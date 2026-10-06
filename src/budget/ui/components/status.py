@@ -6,7 +6,7 @@
 
 from PySide6.QtWidgets import QLabel, QProgressBar, QVBoxLayout, QWidget
 
-from budget.domain.models import AccumulationStatus, TargetProgress
+from budget.domain.models import AccumulationStatus, DebtStatus, TargetProgress
 from budget.services.accumulation import status_label
 from budget.ui.components.basic import text_label
 from budget.ui.formatting import format_money
@@ -21,6 +21,19 @@ def status_badge(status: AccumulationStatus) -> QLabel:
     badge = text_label(text, "caption")
     badge.setObjectName("StatusBadge")
     badge.setProperty("badge", status.value)
+    badge.setWordWrap(False)
+    badge.setFixedHeight(BADGE_HEIGHT)
+    return badge
+
+
+DEBT_STATUS_LABELS = {DebtStatus.ACTIVE: "Активний", DebtStatus.PAID: "✓ Погашений"}
+
+
+def debt_badge(status: DebtStatus) -> QLabel:
+    """Позначка боргу: «Активний» — контур, «Погашений» — нейтральна з позначкою (6.7)."""
+    badge = text_label(DEBT_STATUS_LABELS[status], "caption")
+    badge.setObjectName("StatusBadge")
+    badge.setProperty("badge", "active" if status is DebtStatus.ACTIVE else "paid")
     badge.setWordWrap(False)
     badge.setFixedHeight(BADGE_HEIGHT)
     return badge

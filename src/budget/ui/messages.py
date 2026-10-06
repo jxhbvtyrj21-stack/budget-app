@@ -2,6 +2,7 @@
 
 from budget.errors import BudgetError
 from budget.services.accumulation import CloseBlockedError
+from budget.services.debt import DebtOverpaymentError, DebtRepaidFloorError
 from budget.services.replenishment import RecipientBalanceError
 from budget.services.sources import InsufficientFundsError
 from budget.ui.formatting import format_money
@@ -26,7 +27,25 @@ def recipient_balance_text(name: str, balance, reduction) -> str:
     )
 
 
+def debt_floor_text(repaid) -> str:
+    return (
+        f"Борг має погашення на суму {format_money(repaid)}. Суму боргу не можна зробити "
+        f"меншою за {format_money(repaid)}, а борг — видалити."
+    )
+
+
+def overpayment_text(name: str, remaining, required) -> str:
+    return (
+        f"Залишок боргу «{name}» — {format_money(remaining)}, а погашення — "
+        f"{format_money(required)}. Зменште суму погашення."
+    )
+
+
 def user_text(error: BudgetError) -> str:
+    if isinstance(error, DebtRepaidFloorError):
+        return debt_floor_text(error.repaid)
+    if isinstance(error, DebtOverpaymentError):
+        return overpayment_text(error.name, error.remaining, error.required)
     if isinstance(error, RecipientBalanceError):
         return recipient_balance_text(error.name, error.balance, error.reduction)
     if isinstance(error, CloseBlockedError):

@@ -77,6 +77,7 @@ QPushButton[variant="danger-text"] {{
     border-radius: {RADII["sm"]}px;
 }}
 #ListRow {{ border-bottom: 1px solid {r["divider"]}; }}
+#DividedSection {{ border-top: 1px solid {r["divider"]}; }}
 QPushButton[segment="true"]:checked {{
     background: {r["primary-soft"]}; color: {r["primary"]}; border-color: {r["primary"]};
 }}
@@ -85,7 +86,7 @@ QPushButton[segment="true"]:checked {{
 }}
 #StatusBadge[badge="active"] {{ border: 1px solid {r["border-control"]}; color: {r["text"]}; }}
 #StatusBadge[badge="reached"] {{ background: {r["primary-soft"]}; color: {r["primary"]}; }}
-#StatusBadge[badge="closed"] {{
+#StatusBadge[badge="closed"], #StatusBadge[badge="paid"] {{
     background: {r["neutral-fill"]}; color: {r["on-neutral-fill"]};
 }}
 #ArchiveMarker {{ color: {r["text-muted"]}; font-weight: 600; }}

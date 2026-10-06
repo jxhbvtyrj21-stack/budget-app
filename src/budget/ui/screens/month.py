@@ -1,4 +1,4 @@
-"""Місяць (ui-information-architecture.md, розділ 5): доходи, витрати й поповнення.
+"""Місяць (ui-information-architecture.md, розділ 5): доходи, витрати, поповнення й борги.
 
 Поточний місяць — створення й дії рядків у межах правил ADR 0010–0014; минулі
 місяці — лише перегляд, без кнопок створення, редагування чи видалення.
@@ -9,12 +9,14 @@ from PySide6.QtWidgets import QHBoxLayout, QMenu, QMessageBox, QPushButton, QVBo
 
 from budget.domain.calendar import CalendarMonth
 from budget.errors import BudgetError
-from budget.services.balances import IncomeView
+from budget.services.balances import DebtView, IncomeView
+from budget.services.debt import RepaymentView
 from budget.services.expense import ExpenseView
 from budget.services.facade import AppServices
 from budget.services.replenishment import ReplenishmentView
 from budget.ui.components.basic import Panel, button, text_label
 from budget.ui.components.forms import ListRow, Notice
+from budget.ui.dialogs.debt_dialogs import LoanReceiptDialog, RepaymentDialog
 from budget.ui.dialogs.expense_dialog import ExpenseDialog
 from budget.ui.dialogs.replenishment_dialog import ReplenishmentDialog
 from budget.ui.formatting import format_money, format_month
@@ -77,6 +79,7 @@ class MonthPage(Page):
         self.income_rows = self._section("Доходи")
         self.expense_rows = self._section("Витрати")
         self.replenishment_rows = self._section("Поповнення накопичень")
+        self.debt_rows = self._section("Борги")
         self.body.addStretch(1)
         self.refresh()
 
@@ -166,6 +169,35 @@ class MonthPage(Page):
                 )
             )
 
+        clear_layout(self.debt_rows)
+        debts = self._services.debts
+        receipts = debts.list_for_month(self.month)
+        repayments = debts.repayments_for_month(self.month)
+        if not receipts and not repayments:
+            self.debt_rows.addWidget(
+                text_label("У цьому місяці немає операцій боргів.", "body", muted=True)
+            )
+        for view in receipts:
+            actions = self._loan_actions(view) if editable else None
+            self.debt_rows.addWidget(
+                ListRow(
+                    view.debt.name,
+                    "Отримання позикових коштів · до нерозподіленого залишку",
+                    view.debt.amount,
+                    actions=actions,
+                )
+            )
+        for view in repayments:
+            actions = self._repayment_actions(view) if editable else None
+            self.debt_rows.addWidget(
+                ListRow(
+                    view.repayment.description or "Погашення",
+                    f"Погашення · борг: {view.debt_name} · з: {view.source_name}",
+                    view.repayment.amount,
+                    actions=actions,
+                )
+            )
+
     def _row_actions(self, view: ExpenseView) -> QPushButton:
         more = button("⋯", "text")
         more.setAccessibleName(f"Дії для «{view.expense.name}»")
@@ -248,6 +280,84 @@ class MonthPage(Page):
             self._services.replenishments.delete(view.replenishment.id)
         except BudgetError as error:
             QMessageBox.warning(self, "Видалення поповнення", user_text(error))
+            return
+        self._after_change()
+
+    def _loan_actions(self, view: DebtView) -> QPushButton | None:
+        """Отримання: змінити суму; видалити — лише без погашень (ADR 0018, п. 5)."""
+        service = self._services.debts
+        if service.loan_lock_reason(view.debt) is not None:
+            return None
+        more = button("⋯", "text")
+        more.setAccessibleName(f"Дії для «{view.debt.name}»")
+        menu = QMenu(more)
+        menu.addAction("Змінити суму", lambda: self.open_edit_loan(view))
+        if not view.repaid.is_positive:
+            menu.addAction("Видалити", lambda: self.delete_loan(view))
+        more.setMenu(menu)
+        return more
+
+    def _repayment_actions(self, view: RepaymentView) -> QPushButton:
+        service = self._services.debts
+        more = button("⋯", "text")
+        more.setAccessibleName(f"Дії для погашення боргу «{view.debt_name}»")
+        menu = QMenu(more)
+        menu.addAction("Редагувати", lambda: self.open_edit_repayment(view))
+        if service.repayment_delete_block_reason(view.repayment) is None:
+            menu.addAction("Видалити", lambda: self.delete_repayment(view))
+        more.setMenu(menu)
+        return more
+
+    def open_edit_loan(self, view: DebtView) -> None:
+        if LoanReceiptDialog(self._services.debts, editing=view, parent=self).exec():
+            self._after_change()
+
+    def open_edit_repayment(self, view: RepaymentView) -> None:
+        if RepaymentDialog(self._services.debts, editing=view, parent=self).exec():
+            self._after_change()
+
+    def delete_loan(self, view: DebtView) -> None:
+        amount = format_money(view.debt.amount)
+        if not self._confirm(
+            "Видалення отримання",
+            f"Видалити отримання позикових коштів «{view.debt.name}» на суму {amount} разом "
+            f"із боргом? Загальний нерозподілений залишок зменшиться на {amount}.",
+            "Видалити отримання",
+        ):
+            return
+        self._run_delete(
+            "Видалення отримання", lambda: self._services.debts.delete_loan(view.debt.id)
+        )
+
+    def delete_repayment(self, view: RepaymentView) -> None:
+        amount = format_money(view.repayment.amount)
+        if not self._confirm(
+            "Видалення погашення",
+            f"Видалити погашення боргу «{view.debt_name}» на суму {amount}? Залишок джерела "
+            f"«{view.source_name}» і залишок боргу збільшаться на {amount}.",
+            "Видалити погашення",
+        ):
+            return
+        self._run_delete(
+            "Видалення погашення",
+            lambda: self._services.debts.delete_repayment(view.repayment.id),
+        )
+
+    def _confirm(self, title: str, text: str, confirm_text: str) -> bool:
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setText(text)
+        cancel = box.addButton("Скасувати", QMessageBox.ButtonRole.RejectRole)
+        confirm = box.addButton(confirm_text, QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is confirm
+
+    def _run_delete(self, title: str, action) -> None:
+        try:
+            action()
+        except BudgetError as error:
+            QMessageBox.warning(self, title, user_text(error))
             return
         self._after_change()
 

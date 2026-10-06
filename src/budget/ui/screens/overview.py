@@ -1,7 +1,7 @@
 """Огляд (ui-information-architecture.md, розділ 4) — у межах реалізованих сервісів."""
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QGridLayout
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QFrame, QGridLayout, QVBoxLayout
 
 from budget.services.facade import AppServices
 from budget.ui.components.basic import Panel, amount_label, button, text_label
@@ -10,11 +10,23 @@ from budget.ui.screens.page import Page, clear_layout
 from budget.ui.theme.tokens import SPACING
 
 
+class Section(QFrame):
+    """Секція з верхнім розділювачем, без панелі."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("DividedSection")
+        self.body = QVBoxLayout(self)
+        self.body.setContentsMargins(0, SPACING[5], 0, 0)
+        self.body.setSpacing(SPACING[2])
+
+
 class OverviewPage(Page):
     new_income_requested = Signal()
     new_expense_requested = Signal()
     new_replenishment_requested = Signal()
     long_gap_requested = Signal()
+    debts_requested = Signal()
 
     def __init__(self, services: AppServices) -> None:
         super().__init__("Огляд")
@@ -35,6 +47,10 @@ class OverviewPage(Page):
         self.body.addLayout(self.composition)
         self.month_label = text_label("", "heading")
         self.body.addWidget(self.month_label)
+        # Зобов'язання — окрема секція після розділювача, поза загальною доступною
+        # сумою (ADR 0018, п. 8; ui-information-architecture.md, 4.1).
+        self.obligations = Section()
+        self.body.addWidget(self.obligations)
         self.body.addStretch(1)
         self.refresh()
 
@@ -79,3 +95,31 @@ class OverviewPage(Page):
                 panel.body.addWidget(resolve)
             self.composition.addWidget(panel, 0, column)
         self.month_label.setText(f"Поточний місяць — {format_month(current)}")
+        self._fill_obligations()
+
+    def _fill_obligations(self) -> None:
+        clear_layout(self.obligations.body)
+        self.obligations.body.addWidget(text_label("Зобов'язання", "heading"))
+        active = self._services.debts.list_active()
+        if active:
+            self.obligations.body.addWidget(text_label("Активні борги", "subheading", muted=True))
+            self.debts_label = amount_label(self._services.debts.active_total(), "amount-lg")
+            self.obligations.body.addWidget(self.debts_label)
+            self.obligations.body.addWidget(
+                text_label(f"Активних боргів: {len(active)}", "secondary", muted=True)
+            )
+        else:
+            self.debts_label = None
+            self.obligations.body.addWidget(
+                text_label("Активних боргів немає.", "body", muted=True)
+            )
+        self.obligations.body.addWidget(
+            text_label(
+                "Борги не входять до загальної доступної суми й не зменшують її.",
+                "secondary",
+                muted=True,
+            )
+        )
+        all_debts = button("Усі борги", "text")
+        all_debts.clicked.connect(self.debts_requested.emit)
+        self.obligations.body.addWidget(all_debts, 0, Qt.AlignmentFlag.AlignLeft)

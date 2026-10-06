@@ -15,6 +15,7 @@ from budget.ui.dialogs.income_dialog import IncomeDialog
 from budget.ui.dialogs.long_gap_dialog import LongGapDialog
 from budget.ui.dialogs.replenishment_dialog import ReplenishmentDialog
 from budget.ui.screens.accumulations import AccumulationsPage
+from budget.ui.screens.debts import DebtsPage
 from budget.ui.screens.month import MonthPage
 from budget.ui.screens.overview import OverviewPage
 from budget.ui.screens.placeholders import PlaceholderPage
@@ -90,7 +91,11 @@ class MainWindow(QMainWindow):
         self._add_route("overview", self.overview)
         self._add_route("month", self.month)
         self._add_route("accumulations", self.accumulations)
-        for route, title in MAIN_ROUTES[3:] + FOOTER_ROUTES:
+        self.debts = DebtsPage(self._services)
+        self.debts.changed.connect(self.refresh)
+        self._add_route("debts", self.debts)
+        self.overview.debts_requested.connect(lambda: self.navigate("debts"))
+        for route, title in FOOTER_ROUTES:
             self._add_route(route, PlaceholderPage(title))
         for index, (route, _) in enumerate(MAIN_ROUTES, start=1):
             shortcut = QShortcut(QKeySequence(f"Ctrl+{index}"), self)
@@ -125,6 +130,7 @@ class MainWindow(QMainWindow):
             self.overview.refresh()
             self.month.refresh()
             self.accumulations.refresh()
+            self.debts.refresh()
 
     def open_income_dialog(self) -> None:
         if IncomeDialog(self._services.incomes, self).exec():
