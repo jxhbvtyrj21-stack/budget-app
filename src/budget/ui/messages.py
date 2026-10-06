@@ -1,5 +1,6 @@
 """Тексти повідомлень для користувача, що містять суми (форматування — лише тут і в formatting)."""
 
+from budget.domain.models import BaseMinimumComparison, MinimumComparison
 from budget.errors import BudgetError
 from budget.services.accumulation import CloseBlockedError
 from budget.services.debt import DebtOverpaymentError, DebtRepaidFloorError
@@ -39,6 +40,14 @@ def overpayment_text(name: str, remaining, required) -> str:
         f"Залишок боргу «{name}» — {format_money(remaining)}, а погашення — "
         f"{format_money(required)}. Зменште суму погашення."
     )
+
+
+def comparison_text(comparison: BaseMinimumComparison) -> str:
+    """Нейтральне інформаційне порівняння з базовим мінімумом (ADR 0020; IA 4.1)."""
+    if comparison.outcome is MinimumComparison.EQUAL:
+        return "Фактичні витрати дорівнюють базовому мінімуму"
+    word = "більші" if comparison.outcome is MinimumComparison.GREATER else "менші"
+    return f"Фактичні витрати на {format_money(comparison.difference)} {word} за базовий мінімум"
 
 
 def user_text(error: BudgetError) -> str:
