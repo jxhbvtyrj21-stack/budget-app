@@ -144,3 +144,47 @@ def test_empty_movement_message(qtbot, services):
     assert plain(page.movement_rows.itemAt(0).widget().text()) == (
         "У цьому місяці накопичення не змінювалися."
     )
+
+
+# Огляд: «Поточний місяць» ----------------------------------------------------------------
+
+
+def test_overview_current_month_section(qtbot, services, monkeypatch):
+    populate(services)
+    main = window(qtbot, services)
+    overview = main.overview
+    amounts = {k: plain(v.text()) for k, v in overview.month_amounts.items()}
+    assert amounts == {"Доходи місяця": "0", "Фактичні витрати": "4 000"}
+    assert plain(overview.base_minimum_label.text()) == "не задано"
+    assert overview.comparison_label.isHidden()
+    total_before = plain(overview.total_label.text())
+
+    def save_value(self):
+        self.amount.field.setText("4 000")
+        self.save()
+        return 1
+
+    monkeypatch.setattr(BaseMinimumDialog, "exec", save_value)
+    overview.base_minimum_button.click()
+    assert plain(overview.base_minimum_label.text()) == "4 000"
+    assert overview.base_minimum_button.text() == "Змінити"
+    assert (
+        plain(overview.comparison_label.text()) == "Фактичні витрати дорівнюють базовому мінімуму"
+    )
+    # Базовий мінімум не є фінансовою сумою: загальна доступна сума та сама.
+    assert plain(overview.total_label.text()) == total_before
+    # Місяць оновлено разом з Оглядом.
+    assert plain(main.month.base_minimum_label.text()) == "4 000"
+
+
+def test_overview_open_month_link(qtbot, services):
+    main = window(qtbot, services)
+    main.month.show_month(main.month.month.previous())
+    (link,) = [
+        b
+        for b in main.overview.findChildren(type(main.overview.base_minimum_button))
+        if b.text() == "Відкрити місяць"
+    ]
+    link.click()
+    assert main.current_route() == "month"
+    assert main.month.is_current()

@@ -95,6 +95,8 @@ class MainWindow(QMainWindow):
         self.debts.changed.connect(self.refresh)
         self._add_route("debts", self.debts)
         self.overview.debts_requested.connect(lambda: self.navigate("debts"))
+        self.overview.month_requested.connect(self.open_current_month)
+        self.overview.changed.connect(self.refresh)
         for route, title in FOOTER_ROUTES:
             self._add_route(route, PlaceholderPage(title))
         for index, (route, _) in enumerate(MAIN_ROUTES, start=1):
@@ -139,6 +141,10 @@ class MainWindow(QMainWindow):
     def open_expense_dialog(self) -> None:
         if ExpenseDialog(self._services.expenses, parent=self).exec():
             self.refresh()
+
+    def open_current_month(self) -> None:
+        self.month.show_month(self._services.months.current_month())
+        self.navigate("month")
 
     def open_replenishment_dialog(self) -> None:
         if ReplenishmentDialog(self._services.replenishments, parent=self).exec():

@@ -5,7 +5,9 @@ from PySide6.QtWidgets import QFrame, QGridLayout, QVBoxLayout
 
 from budget.services.facade import AppServices
 from budget.ui.components.basic import Panel, amount_label, button, text_label
-from budget.ui.formatting import format_month
+from budget.ui.dialogs.base_minimum_dialog import BaseMinimumDialog
+from budget.ui.formatting import format_money, format_month
+from budget.ui.messages import comparison_text
 from budget.ui.screens.page import Page, clear_layout
 from budget.ui.theme.tokens import SPACING
 
@@ -27,6 +29,8 @@ class OverviewPage(Page):
     new_replenishment_requested = Signal()
     long_gap_requested = Signal()
     debts_requested = Signal()
+    month_requested = Signal()
+    changed = Signal()
 
     def __init__(self, services: AppServices) -> None:
         super().__init__("Огляд")
@@ -47,6 +51,10 @@ class OverviewPage(Page):
         self.body.addLayout(self.composition)
         self.month_label = text_label("", "heading")
         self.body.addWidget(self.month_label)
+        # Поточний місяць — компактно: підсумки, базовий мінімум і перехід до Місяця.
+        self.current_month = QVBoxLayout()
+        self.current_month.setSpacing(SPACING[2])
+        self.body.addLayout(self.current_month)
         # Зобов'язання — окрема секція після розділювача, поза загальною доступною
         # сумою (ADR 0018, п. 8; ui-information-architecture.md, 4.1).
         self.obligations = Section()
@@ -95,7 +103,57 @@ class OverviewPage(Page):
                 panel.body.addWidget(resolve)
             self.composition.addWidget(panel, 0, column)
         self.month_label.setText(f"Поточний місяць — {format_month(current)}")
+        self._fill_current_month(current)
         self._fill_obligations()
+
+    def _fill_current_month(self, month) -> None:
+        """Доходи й фактичні витрати місяця, базовий мінімум і нейтральне порівняння."""
+        layout = self.current_month
+        clear_layout(layout)
+        analysis = self._services.analysis.analyse(month)
+        figures = QGridLayout()
+        figures.setHorizontalSpacing(SPACING[6])
+        self.month_amounts = {}
+        for column, (title, amount) in enumerate(
+            (("Доходи місяця", analysis.incomes), ("Фактичні витрати", analysis.actual_expenses))
+        ):
+            figures.addWidget(text_label(title, "caption", muted=True), 0, column)
+            self.month_amounts[title] = amount_label(amount)
+            figures.addWidget(self.month_amounts[title], 1, column)
+        figures.addWidget(text_label("Базовий мінімум", "caption", muted=True), 0, 2)
+        if analysis.base_minimum is None:
+            self.base_minimum_label = text_label("не задано", "body", muted=True)
+        else:
+            self.base_minimum_label = amount_label(analysis.base_minimum)
+        figures.addWidget(self.base_minimum_label, 1, 2)
+        title = "Задати" if analysis.base_minimum is None else "Змінити"
+        self.base_minimum_button = button(title, "text")
+        self.base_minimum_button.clicked.connect(lambda: self.open_base_minimum(month))
+        figures.addWidget(self.base_minimum_button, 2, 2, Qt.AlignmentFlag.AlignLeft)
+        layout.addLayout(figures)
+        self.comparison_label = text_label(
+            comparison_text(analysis.comparison) if analysis.comparison else "",
+            "secondary",
+            muted=True,
+        )
+        self.comparison_label.setVisible(analysis.comparison is not None)
+        layout.addWidget(self.comparison_label)
+        layout.addWidget(
+            text_label(
+                f"Поповнення накопичень {format_money(analysis.replenishments)} · погашення "
+                f"боргів {format_money(analysis.debt_repayments)} · отримані позикові кошти "
+                f"{format_money(analysis.loan_receipts)}",
+                "secondary",
+                muted=True,
+            )
+        )
+        open_month = button("Відкрити місяць", "text")
+        open_month.clicked.connect(self.month_requested.emit)
+        layout.addWidget(open_month, 0, Qt.AlignmentFlag.AlignLeft)
+
+    def open_base_minimum(self, month) -> None:
+        if BaseMinimumDialog(self._services.base_minimums, month, parent=self).exec():
+            self.changed.emit()
 
     def _fill_obligations(self) -> None:
         clear_layout(self.obligations.body)
