@@ -1,0 +1,60 @@
+# Розділ 5.6 і ADR 0017: без cron і матриць; застарілі запуски скасовуються;
+# зміни лише документації CI не запускають. build-check з'явиться разом зі збіркою PyInstaller.
+name: ci
+
+on:
+  push:
+    paths-ignore: ["docs/**", "**/*.md"]
+  pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.8.17"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  core-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --locked
+      # domain, storage, services і архітектурні обмеження — без Qt.
+      - run: >-
+          uv run pytest tests/domain tests/storage tests/services
+          tests/test_architecture.py tests/test_product_identity.py
+
+  windows-tests:
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      || (github.event_name == 'pull_request' && github.base_ref == 'main')
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --locked
+      - run: uv run pytest
