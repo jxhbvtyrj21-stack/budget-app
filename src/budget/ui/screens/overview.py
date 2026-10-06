@@ -13,6 +13,7 @@ from budget.ui.theme.tokens import SPACING
 class OverviewPage(Page):
     new_income_requested = Signal()
     new_expense_requested = Signal()
+    new_replenishment_requested = Signal()
     long_gap_requested = Signal()
 
     def __init__(self, services: AppServices) -> None:
@@ -21,6 +22,9 @@ class OverviewPage(Page):
         new_income = button("Новий дохід")
         new_income.clicked.connect(self.new_income_requested.emit)
         self.header.addWidget(new_income)
+        self.new_replenishment_button = button("Поповнити накопичення")
+        self.new_replenishment_button.clicked.connect(self.new_replenishment_requested.emit)
+        self.header.addWidget(self.new_replenishment_button)
         new_expense = button("Нова витрата", "primary")
         new_expense.clicked.connect(self.new_expense_requested.emit)
         self.header.addWidget(new_expense)

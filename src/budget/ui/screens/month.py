@@ -1,20 +1,22 @@
-"""Місяць (ui-information-architecture.md, розділ 5): доходи й звичайні витрати.
+"""Місяць (ui-information-architecture.md, розділ 5): доходи, витрати й поповнення.
 
 Поточний місяць — створення й дії рядків у межах правил ADR 0010–0014; минулі
 місяці — лише перегляд, без кнопок створення, редагування чи видалення.
 """
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QMenu, QMessageBox, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QHBoxLayout, QMenu, QMessageBox, QPushButton, QVBoxLayout
 
 from budget.domain.calendar import CalendarMonth
 from budget.errors import BudgetError
 from budget.services.balances import IncomeView
 from budget.services.expense import ExpenseView
 from budget.services.facade import AppServices
+from budget.services.replenishment import ReplenishmentView
 from budget.ui.components.basic import Panel, button, text_label
 from budget.ui.components.forms import ListRow, Notice
 from budget.ui.dialogs.expense_dialog import ExpenseDialog
+from budget.ui.dialogs.replenishment_dialog import ReplenishmentDialog
 from budget.ui.formatting import format_money, format_month
 from budget.ui.messages import user_text
 from budget.ui.screens.page import Page, clear_layout
@@ -26,6 +28,12 @@ def income_secondary(view: IncomeView) -> str:
 
 def expense_secondary(view: ExpenseView) -> str:
     return f"Витрата · з: {view.source_name}"
+
+
+def replenishment_secondary(view: ReplenishmentView) -> str:
+    """Поповнення · у: отримувач · з: джерела (design-system.md, 9)."""
+    sources = ", ".join(dict.fromkeys(view.source_names))
+    return f"Поповнення · у: {view.recipient_name} · з: {sources}"
 
 
 class MonthPage(Page):
@@ -50,14 +58,25 @@ class MonthPage(Page):
         self.new_expense_button.clicked.connect(self.open_new_expense)
         self.new_income_button = button("Новий дохід")
         self.new_income_button.clicked.connect(self.new_income_requested.emit)
-        self.header.addWidget(self.new_income_button)
-        self.header.addWidget(self.new_expense_button)
+        self.new_replenishment_button = button("Поповнити накопичення")
+        self.new_replenishment_button.clicked.connect(self.open_new_replenishment)
+        # Дії поточного місяця — окремим рядком під заголовком, щоб не стискати назву.
+        self.actions_row = QHBoxLayout()
+        self.actions_row.addStretch(1)
+        for action in (
+            self.new_income_button,
+            self.new_replenishment_button,
+            self.new_expense_button,
+        ):
+            self.actions_row.addWidget(action)
+        self.body.insertLayout(1, self.actions_row)
 
         self.read_only_banner = Notice("Минулий місяць — лише перегляд")
         self.read_only_banner.setObjectName("InfoBanner")
         self.body.addWidget(self.read_only_banner)
         self.income_rows = self._section("Доходи")
         self.expense_rows = self._section("Витрати")
+        self.replenishment_rows = self._section("Поповнення накопичень")
         self.body.addStretch(1)
         self.refresh()
 
@@ -96,6 +115,7 @@ class MonthPage(Page):
         self.read_only_banner.setVisible(not editable)
         self.new_expense_button.setVisible(editable)
         self.new_income_button.setVisible(editable)
+        self.new_replenishment_button.setVisible(editable)
         self.previous_button.setEnabled(self.month > self.first_month())
         self.next_button.setEnabled(self.month < current)
 
@@ -126,6 +146,23 @@ class MonthPage(Page):
             self.expense_rows.addWidget(
                 ListRow(
                     view.expense.name, expense_secondary(view), view.expense.amount, actions=actions
+                )
+            )
+
+        clear_layout(self.replenishment_rows)
+        replenishments = self._services.replenishments.list_for_month(self.month)
+        if not replenishments:
+            self.replenishment_rows.addWidget(
+                text_label("У цьому місяці немає поповнень накопичень.", "body", muted=True)
+            )
+        for view in replenishments:
+            actions = self._replenishment_actions(view) if editable else None
+            self.replenishment_rows.addWidget(
+                ListRow(
+                    view.replenishment.name,
+                    replenishment_secondary(view),
+                    view.total,
+                    actions=actions,
                 )
             )
 
@@ -167,6 +204,50 @@ class MonthPage(Page):
             self._services.expenses.delete(view.expense.id)
         except BudgetError as error:
             QMessageBox.warning(self, "Видалення витрати", user_text(error))
+            return
+        self._after_change()
+
+    def _replenishment_actions(self, view: ReplenishmentView) -> QPushButton:
+        service = self._services.replenishments
+        more = button("⋯", "text")
+        more.setAccessibleName(f"Дії для «{view.replenishment.name}»")
+        menu = QMenu(more)
+        menu.addAction("Редагувати", lambda: self.open_edit_replenishment(view))
+        locked = service.financial_lock_reason(view.replenishment) is not None
+        if not locked and not service.locked_sources(view.replenishment):
+            menu.addAction("Видалити", lambda: self.delete_replenishment(view))
+        more.setMenu(menu)
+        return more
+
+    def open_new_replenishment(self) -> None:
+        if ReplenishmentDialog(self._services.replenishments, parent=self).exec():
+            self._after_change()
+
+    def open_edit_replenishment(self, view: ReplenishmentView) -> None:
+        dialog = ReplenishmentDialog(self._services.replenishments, editing=view, parent=self)
+        if dialog.exec():
+            self._after_change()
+
+    def delete_replenishment(self, view: ReplenishmentView) -> None:
+        total = format_money(view.total)
+        sources = ", ".join(dict.fromkeys(view.source_names))
+        box = QMessageBox(self)
+        box.setWindowTitle("Видалення поповнення")
+        box.setText(
+            f"Видалити поповнення «{view.replenishment.name}» на суму {total}? "
+            f"Кошти повернуться джерелам ({sources}), а залишок накопичення "
+            f"«{view.recipient_name}» зменшиться на {total}."
+        )
+        cancel = box.addButton("Скасувати", QMessageBox.ButtonRole.RejectRole)
+        confirm = box.addButton("Видалити поповнення", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(cancel)
+        box.exec()
+        if box.clickedButton() is not confirm:
+            return
+        try:
+            self._services.replenishments.delete(view.replenishment.id)
+        except BudgetError as error:
+            QMessageBox.warning(self, "Видалення поповнення", user_text(error))
             return
         self._after_change()
 

@@ -30,6 +30,7 @@ from budget.ui.components.basic import Panel, amount_label, button, text_label
 from budget.ui.components.forms import ListRow, Notice
 from budget.ui.components.status import ProgressView, archive_marker, status_badge
 from budget.ui.dialogs.accumulation_dialog import AccumulationDialog
+from budget.ui.dialogs.replenishment_dialog import ReplenishmentDialog
 from budget.ui.formatting import format_money, format_month
 from budget.ui.messages import close_blocked_text, user_text
 from budget.ui.screens.page import Page, clear_layout
@@ -230,6 +231,8 @@ class AccumulationDetailPage(Page):
 
         actions = QHBoxLayout()
         actions.setSpacing(SPACING[3])
+        self.replenish_button = button("Поповнити", "primary")
+        self.replenish_button.clicked.connect(self.open_replenish)
         self.edit_button = button("Змінити назву, опис і цільову суму")
         self.edit_button.clicked.connect(self.open_edit)
         self.status_button = button("Змінити статус")
@@ -240,6 +243,7 @@ class AccumulationDetailPage(Page):
         self.unarchive_button = button("Розархівувати")
         self.unarchive_button.clicked.connect(self.unarchive)
         for widget in (
+            self.replenish_button,
             self.status_button,
             self.archive_button,
             self.unarchive_button,
@@ -318,25 +322,40 @@ class AccumulationDetailPage(Page):
         is_closed = accumulation.status is AccumulationStatus.CLOSED
         self.archive_button.setVisible(is_closed and not archived)
         self.unarchive_button.setVisible(archived)
+        # Нове поповнення архівованого накопичення неможливе (Q187).
+        self.replenish_button.setVisible(not archived)
         self._fill_history(view)
 
     def _fill_history(self, view: AccumulationView) -> None:
+        """Хронологія за місяцями: поповнення (позначка «+») і витрати з накопичення."""
         clear_layout(self.history_rows)
         initial = view.accumulation.initial_balance
         if initial.is_positive:
             self.history_rows.addWidget(ListRow(INITIAL_BALANCE_ROW, "Без місяця", initial))
-        expenses = self._services.accumulations.expense_history(view.accumulation.id)
+        accumulation_id = view.accumulation.id
+        entries = [
+            (
+                r.replenishment.month,
+                f"+ Поповнення · з: {', '.join(dict.fromkeys(r.source_names))}",
+                r.replenishment.name,
+                r.total,
+            )
+            for r in self._services.replenishments.list_for_accumulation(accumulation_id)
+        ] + [
+            (e.expense.month, "Витрата з накопичення", e.expense.name, e.expense.amount)
+            for e in self._services.accumulations.expense_history(accumulation_id)
+        ]
+        # Стабільне сортування: у межах місяця спершу поповнення, потім витрати.
+        entries.sort(key=lambda entry: entry[0], reverse=True)
         month = None
-        for item in expenses:
-            if item.expense.month != month:
-                month = item.expense.month
+        for entry_month, secondary, name, amount in entries:
+            if entry_month != month:
+                month = entry_month
                 heading = text_label(format_month(month), "subheading")
                 heading.setContentsMargins(0, SPACING[3], 0, SPACING[1])
                 self.history_rows.addWidget(heading)
-            self.history_rows.addWidget(
-                ListRow(item.expense.name, "Витрата з накопичення", item.expense.amount)
-            )
-        if not expenses and not initial.is_positive:
+            self.history_rows.addWidget(ListRow(name, secondary, amount))
+        if not entries and not initial.is_positive:
             self.history_rows.addWidget(text_label("Операцій ще немає.", "body", muted=True))
 
     # Дії -------------------------------------------------------------------------------
@@ -363,6 +382,15 @@ class AccumulationDetailPage(Page):
     def unarchive(self) -> None:
         accumulation_id = self.view.accumulation.id
         self._run("Розархівування", lambda: self._services.accumulations.unarchive(accumulation_id))
+
+    def open_replenish(self) -> None:
+        """Поповнення з уже визначеним отримувачем — цим накопиченням."""
+        dialog = ReplenishmentDialog(
+            self._services.replenishments, recipient_id=self.view.accumulation.id, parent=self
+        )
+        if dialog.exec():
+            self.refresh()
+            self.changed.emit()
 
     def open_edit(self) -> None:
         dialog = AccumulationDialog(self._services.accumulations, editing=self.view, parent=self)

@@ -13,6 +13,7 @@ from budget.ui.components.sidebar import Sidebar
 from budget.ui.dialogs.expense_dialog import ExpenseDialog
 from budget.ui.dialogs.income_dialog import IncomeDialog
 from budget.ui.dialogs.long_gap_dialog import LongGapDialog
+from budget.ui.dialogs.replenishment_dialog import ReplenishmentDialog
 from budget.ui.screens.accumulations import AccumulationsPage
 from budget.ui.screens.month import MonthPage
 from budget.ui.screens.overview import OverviewPage
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
         self.month.new_income_requested.connect(self.open_income_dialog)
         self.month.changed.connect(self.refresh)
         self.overview.new_expense_requested.connect(self.open_expense_dialog)
+        self.overview.new_replenishment_requested.connect(self.open_replenishment_dialog)
         self.accumulations = AccumulationsPage(self._services)
         self.accumulations.changed.connect(self.refresh)
         self._add_route("overview", self.overview)
@@ -130,6 +132,10 @@ class MainWindow(QMainWindow):
 
     def open_expense_dialog(self) -> None:
         if ExpenseDialog(self._services.expenses, parent=self).exec():
+            self.refresh()
+
+    def open_replenishment_dialog(self) -> None:
+        if ReplenishmentDialog(self._services.replenishments, parent=self).exec():
             self.refresh()
 
     def open_long_gap_dialog(self) -> None:
