@@ -9,6 +9,7 @@ from budget.services.balances import BalanceService
 from budget.services.expense import ExpenseService
 from budget.services.income import IncomeService
 from budget.services.month import MonthService, MonthTransitionService
+from budget.services.replenishment import ReplenishmentService
 from budget.services.setup import InitialSetupService
 
 
@@ -18,6 +19,7 @@ class AppServices:
     incomes: IncomeService
     expenses: ExpenseService
     accumulations: AccumulationService
+    replenishments: ReplenishmentService
     balances: BalanceService
     months: MonthService
     transitions: MonthTransitionService
@@ -29,6 +31,7 @@ class AppServices:
             incomes=IncomeService(connection, clock),
             expenses=ExpenseService(connection, clock),
             accumulations=AccumulationService(connection, clock),
+            replenishments=ReplenishmentService(connection, clock),
             balances=BalanceService(connection),
             months=MonthService(clock),
             transitions=MonthTransitionService(connection, clock),

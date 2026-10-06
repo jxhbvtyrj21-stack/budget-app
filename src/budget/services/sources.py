@@ -50,8 +50,14 @@ class SourceLedger:
         self._accumulations = AccumulationRepository(connection)
         self._remainder = GeneralRemainderRepository(connection)
 
-    def require_available(self, source: SourceRef, amount: Money) -> None:
-        """Перевіряє, що обране джерело може дати ``amount``. Нічого не змінює."""
+    def require_available(
+        self, source: SourceRef, amount: Money, released: Money | None = None
+    ) -> None:
+        """Перевіряє, що обране джерело може дати ``amount``. Нічого не змінює.
+
+        ``released`` — сума, яку ця сама операція вже бере з джерела й поверне під час
+        зміни: вона рахується доступною (без проміжного зняття коштів).
+        """
         require_positive(amount)
         if source.kind is SourceKind.GENERAL_REMAINDER:
             available = self._remainder.get()
@@ -79,6 +85,8 @@ class SourceLedger:
                 )
             available = self._balances.accumulation_balance(accumulation)
             name = accumulation.name
+        if released is not None:
+            available = available + released
         if amount > available:
             raise InsufficientFundsError(name, available, amount)
 
