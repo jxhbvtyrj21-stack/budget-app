@@ -115,7 +115,7 @@ def test_income_dialog_creates_income(qtbot, connection, clock):
     (view,) = window._services.incomes.list_for_month(window._services.months.current_month())
     assert view.balance == Money(250_050)
     assert text(window.overview.total_label) == "3 500,50"
-    assert window.month.rows.count() == 1
+    assert window.month.income_rows.count() == 1
 
 
 def test_long_gap_dialog_requires_explicit_choice(qtbot, connection, clock):

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from budget.domain.calendar import Clock
 from budget.services.balances import BalanceService
+from budget.services.expense import ExpenseService
 from budget.services.income import IncomeService
 from budget.services.month import MonthService, MonthTransitionService
 from budget.services.setup import InitialSetupService
@@ -14,6 +15,7 @@ from budget.services.setup import InitialSetupService
 class AppServices:
     setup: InitialSetupService
     incomes: IncomeService
+    expenses: ExpenseService
     balances: BalanceService
     months: MonthService
     transitions: MonthTransitionService
@@ -23,6 +25,7 @@ class AppServices:
         return cls(
             setup=InitialSetupService(connection, clock),
             incomes=IncomeService(connection, clock),
+            expenses=ExpenseService(connection, clock),
             balances=BalanceService(connection),
             months=MonthService(clock),
             transitions=MonthTransitionService(connection, clock),

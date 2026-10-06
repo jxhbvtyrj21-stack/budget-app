@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QWidget
 
 from budget.services.facade import AppServices
 from budget.ui.components.sidebar import Sidebar
+from budget.ui.dialogs.expense_dialog import ExpenseDialog
 from budget.ui.dialogs.income_dialog import IncomeDialog
 from budget.ui.dialogs.long_gap_dialog import LongGapDialog
 from budget.ui.screens.month import MonthPage
@@ -79,6 +80,8 @@ class MainWindow(QMainWindow):
         self.overview.long_gap_requested.connect(self.open_long_gap_dialog)
         self.month = MonthPage(self._services)
         self.month.new_income_requested.connect(self.open_income_dialog)
+        self.month.changed.connect(self.refresh)
+        self.overview.new_expense_requested.connect(self.open_expense_dialog)
         self._add_route("overview", self.overview)
         self._add_route("month", self.month)
         for route, title in MAIN_ROUTES[2:] + FOOTER_ROUTES:
@@ -118,6 +121,10 @@ class MainWindow(QMainWindow):
 
     def open_income_dialog(self) -> None:
         if IncomeDialog(self._services.incomes, self).exec():
+            self.refresh()
+
+    def open_expense_dialog(self) -> None:
+        if ExpenseDialog(self._services.expenses, parent=self).exec():
             self.refresh()
 
     def open_long_gap_dialog(self) -> None:

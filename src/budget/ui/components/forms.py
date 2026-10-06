@@ -58,7 +58,15 @@ class Notice(QFrame):
 class ListRow(QFrame):
     """Рядок редакційного списку: назва, другий рядок, сума, позначка архіву."""
 
-    def __init__(self, title: str, secondary: str, amount: Money, *, archived: bool = False):
+    def __init__(
+        self,
+        title: str,
+        secondary: str,
+        amount: Money,
+        *,
+        archived: bool = False,
+        actions: QWidget | None = None,
+    ):
         super().__init__()
         self.setObjectName("ListRow")
         layout = QHBoxLayout(self)
@@ -71,3 +79,5 @@ class ListRow(QFrame):
         if archived:
             layout.addWidget(text_label("В архіві", "caption", muted=True))
         layout.addWidget(amount_label(amount))
+        if actions is not None:
+            layout.addWidget(actions)

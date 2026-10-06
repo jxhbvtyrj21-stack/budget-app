@@ -12,14 +12,18 @@ from budget.ui.theme.tokens import SPACING
 
 class OverviewPage(Page):
     new_income_requested = Signal()
+    new_expense_requested = Signal()
     long_gap_requested = Signal()
 
     def __init__(self, services: AppServices) -> None:
         super().__init__("Огляд")
         self._services = services
-        new_income = button("Новий дохід", "primary")
+        new_income = button("Новий дохід")
         new_income.clicked.connect(self.new_income_requested.emit)
         self.header.addWidget(new_income)
+        new_expense = button("Нова витрата", "primary")
+        new_expense.clicked.connect(self.new_expense_requested.emit)
+        self.header.addWidget(new_expense)
         self.summary = Panel()
         self.body.addWidget(self.summary)
         self.composition = QGridLayout()

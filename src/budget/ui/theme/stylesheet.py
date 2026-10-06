@@ -64,6 +64,7 @@ QLabel[tone="primary"] {{ color: {r["primary"]}; }}
 QPushButton[variant="text"] {{
     background: transparent; color: {r["primary"]}; border: none; padding: 0; font-weight: 600;
 }}
+QPushButton[variant="text"]::menu-indicator {{ image: none; width: 0; }}
 QPushButton[variant="danger-text"] {{
     background: transparent; color: {r["danger-text"]}; border: none; padding: 0;
 }}
@@ -76,6 +77,7 @@ QPushButton[variant="danger-text"] {{
     border-radius: {RADII["sm"]}px;
 }}
 #ListRow {{ border-bottom: 1px solid {r["divider"]}; }}
+#InfoBanner {{ background: {r["surface-sunken"]}; border-radius: {RADII["sm"]}px; }}
 QDialog {{ background: {r["surface"]}; }}
 """,
     ]
