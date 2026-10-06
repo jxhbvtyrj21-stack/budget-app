@@ -87,16 +87,30 @@ def restore_and_open(paths: DataPaths, clock: Clock, backup_path: Path) -> sqlit
         connection = open_application_database(paths, clock)
     except BudgetError as exc:
         log.exception("Restored database failed to open")
-        recovery.rollback(outcome)
+        _roll_back(recovery, outcome, exc)
         raise RestoreError(detail=f"Відновлена база не відкрилася: {exc.detail}") from exc
     try:
         recovery.check_restored(connection)
-    except BudgetError:
+    except BudgetError as exc:
+        log.exception("Restored database failed the integrity check")
         connection.close()
-        recovery.rollback(outcome)
+        _roll_back(recovery, outcome, exc)
         raise
     recovery.finish(outcome)
     return connection
+
+
+def _roll_back(recovery: RecoveryService, outcome, cause: BudgetError) -> None:
+    """Відкат невдалого відновлення. Якщо й він не вдався, жодна з двох помилок не
+    приховується: обидві в журналі й у подробицях, а користувач бачить, що попередній
+    стан не повернуто."""
+    try:
+        recovery.rollback(outcome)
+    except RestoreError as failure:
+        log.exception("Rollback after failed restore failed")
+        raise RestoreError(
+            failure.user_message, detail=f"{cause.detail}; відкат: {failure.detail}"
+        ) from cause
 
 
 def apply_theme() -> None:

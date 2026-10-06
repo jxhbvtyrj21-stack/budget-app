@@ -231,6 +231,12 @@ class RestoreError(StorageError):
     )
 
 
+ROLLBACK_FAILED_MESSAGE = (
+    "Не вдалося відновити дані з вибраної копії, а попередній стан файлів даних повернути "
+    "не вдалося. Резервні копії не змінено."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class RestoreOutcome:
     """Що зроблено під час заміни бази; потрібне, щоб завершити або відкотити відновлення."""
@@ -302,7 +308,13 @@ class RecoveryService:
         try:
             restore_from_backup(backup_path, self._database_path)
         except StorageError as exc:
-            self._put_back(set_aside)
+            try:
+                self._put_back(set_aside)
+            except RestoreError as failure:
+                log.exception("Не вдалося повернути попередні файли бази")
+                raise RestoreError(
+                    ROLLBACK_FAILED_MESSAGE, detail=f"{exc.detail}; повернення: {failure.detail}"
+                ) from exc
             raise RestoreError(detail=exc.detail) from exc
         return RestoreOutcome(backup_path, before_restore, set_aside, corrupted)
 
@@ -323,12 +335,19 @@ class RecoveryService:
         """Відновлення не вдалося після заміни: повернути попередні файли бази.
 
         Відновлений файл — лише копія резервної копії, яка лишається на місці.
+        Невдалий відкат — ``RestoreError`` із ``ROLLBACK_FAILED_MESSAGE``: користувачу
+        не можна казати, що попередній стан збережено без змін.
         """
         try:
             discard_database(self._database_path)
         except OSError as exc:
-            raise RestoreError(detail=f"Не вдалося прибрати відновлену базу: {exc}") from exc
-        self._put_back(outcome.set_aside)
+            raise RestoreError(
+                ROLLBACK_FAILED_MESSAGE, detail=f"Не вдалося прибрати відновлену базу: {exc}"
+            ) from exc
+        try:
+            self._put_back(outcome.set_aside)
+        except RestoreError as exc:
+            raise RestoreError(ROLLBACK_FAILED_MESSAGE, detail=exc.detail) from exc
 
     def _backup_current(self) -> Path:
         connection = open_database(self._database_path)

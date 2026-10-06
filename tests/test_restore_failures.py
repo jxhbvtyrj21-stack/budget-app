@@ -289,3 +289,58 @@ def test_repeated_recovery(paths, clock, backup, monkeypatch):
     connection.close()
     kept = [p.name for p in paths.root.iterdir() if ".corrupted-" in p.name]
     assert len([name for name in kept if not name.endswith(("-wal", "-shm"))]) == 2
+
+
+# Подвійна невдача: відновлення, а потім і повернення попереднього стану -------------------
+
+
+def test_double_failure_after_reopen_reports_both_errors(paths, clock, backup, monkeypatch, caplog):
+    quarantined(paths, clock)
+
+    def corrupted(*args):
+        raise DatabaseCorruptedError(detail="quick_check не пройдено")
+
+    def locked(database_path):
+        raise PermissionError(errno.EACCES, "файл зайнятий іншим процесом")
+
+    monkeypatch.setattr(app_module, "prepare_database", corrupted)
+    monkeypatch.setattr(backup_service_module, "discard_database", locked)
+    with caplog.at_level("ERROR"):
+        error = restore_fails(paths, clock, backup)
+    # Користувачу не кажуть, що попередній стан збережено; обидві причини — у подробицях.
+    assert error.user_message == backup_service_module.ROLLBACK_FAILED_MESSAGE
+    assert "quick_check" in error.detail and "файл зайнятий" in error.detail
+    assert isinstance(error.__cause__, DatabaseCorruptedError)
+    assert "Restored database failed to open" in caplog.text
+    assert "Rollback after failed restore failed" in caplog.text
+    assert backup.exists()  # вибрана копія не змінена
+    monkeypatch.undo()
+    # Стан лишився придатним для наступної спроби в діалозі «Дані пошкоджено».
+    later(clock, minutes=1)
+    connection = restore_and_open(paths, clock, backup)
+    assert balance(connection) == 100_000
+    connection.close()
+
+
+def test_double_failure_during_replacement_keeps_set_aside_files(
+    paths, clock, backup, monkeypatch, caplog
+):
+    def replace(source, target):
+        raise OSError(errno.EIO, "I/O error")
+
+    def cannot_put_back(source, target):
+        raise StorageError(detail="файл зайнятий іншим процесом")
+
+    monkeypatch.setattr(recovery_module.os, "replace", replace)
+    monkeypatch.setattr(backup_service_module, "move_database_files", cannot_put_back)
+    with caplog.at_level("ERROR"):
+        error = restore_fails(paths, clock, backup)
+    assert error.user_message == backup_service_module.ROLLBACK_FAILED_MESSAGE
+    assert "I/O error" in error.detail and "файл зайнятий" in error.detail
+    assert "Не вдалося повернути попередні файли бази" in caplog.text
+    # Попередня база не загублена: вона лежить поруч під назвою «replaced-…».
+    (kept,) = [p for p in paths.root.iterdir() if ".replaced-" in p.name]
+    reader = sqlite3.connect(kept.as_uri() + "?mode=ro", uri=True)
+    assert balance(reader) == 500_000
+    reader.close()
+    assert not paths.database.exists()
