@@ -10,6 +10,7 @@ from budget.domain.calendar import CalendarMonth
 from budget.domain.models import (
     Accumulation,
     AccumulationStatus,
+    BaseMinimum,
     Debt,
     DebtOrigin,
     DebtRepayment,
@@ -542,6 +543,31 @@ def _repayment(row: tuple) -> DebtRepayment:
         Money(amount),
         SourceRef(SourceKind(kind), income_id, accumulation_id),
     )
+
+
+class BaseMinimumRepository:
+    """Базовий мінімум місяця: один запис на місяць (ADR 0002, ADR 0022).
+
+    Це орієнтир, а не фінансовий запис: залишків він не змінює. Видалення немає —
+    значення лише задається й змінюється.
+    """
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def get(self, month: CalendarMonth) -> BaseMinimum | None:
+        row = self._connection.execute(
+            "SELECT month, amount FROM base_minimums WHERE month = ?", (str(month),)
+        ).fetchone()
+        return BaseMinimum(CalendarMonth.parse(row[0]), Money(row[1])) if row else None
+
+    def set(self, base_minimum: BaseMinimum) -> None:
+        """Задає значення місяця або змінює вже задане."""
+        self._connection.execute(
+            "INSERT INTO base_minimums (month, amount) VALUES (?, ?)"
+            " ON CONFLICT (month) DO UPDATE SET amount = excluded.amount",
+            (str(base_minimum.month), base_minimum.amount.kopiyky),
+        )
 
 
 class FinancialRecordRepository:
