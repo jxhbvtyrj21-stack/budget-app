@@ -9,6 +9,7 @@ from budget.domain.models import (
     DebtOrigin,
     Expense,
     Income,
+    Replenishment,
     ReplenishmentPart,
     SourceKind,
     SourceRef,
@@ -78,3 +79,23 @@ def test_accumulation_transition_graph():
         reached: (active, closed),
         closed: (active,),
     }
+
+
+def test_replenishment_totals_by_source_aggregate_duplicates():
+    income = SourceRef(SourceKind.INCOME, income_id=1)
+    remainder = SourceRef(SourceKind.GENERAL_REMAINDER)
+    replenishment = Replenishment(
+        None,
+        MONTH,
+        "Відкладаю",
+        None,
+        1,
+        (
+            ReplenishmentPart(income, Money(100)),
+            ReplenishmentPart(remainder, Money(50)),
+            ReplenishmentPart(income, Money(25)),
+        ),
+    )
+    assert replenishment.totals_by_source() == {income: Money(125), remainder: Money(50)}
+    assert list(replenishment.totals_by_source()) == [income, remainder]
+    assert replenishment.total == Money(175)

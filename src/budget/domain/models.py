@@ -204,6 +204,17 @@ class Replenishment:
             total = total + part.amount
         return total
 
+    def totals_by_source(self) -> dict[SourceRef, Money]:
+        """Сума частин за кожним джерелом у порядку першої появи.
+
+        Достатність коштів перевіряється для джерела загалом (ADR 0007, п. 5), тож
+        дві частини з одного джерела не дають обійти його залишок.
+        """
+        totals: dict[SourceRef, Money] = {}
+        for part in self.parts:
+            totals[part.source] = totals.get(part.source, Money.zero()) + part.amount
+        return totals
+
 
 class DebtOrigin(StrEnum):
     """Походження боргу: початковий (майстер) чи отримання позикових коштів (ADR 0018)."""

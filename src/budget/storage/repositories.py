@@ -14,6 +14,8 @@ from budget.domain.models import (
     DebtOrigin,
     Expense,
     Income,
+    Replenishment,
+    ReplenishmentPart,
     SourceKind,
     SourceRef,
 )
@@ -264,6 +266,118 @@ class ExpenseRepository:
 
     def delete(self, expense_id: int) -> None:
         self._connection.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+
+
+_REPLENISHMENT_COLUMNS = "id, month, name, description, accumulation_id"
+
+
+class ReplenishmentRepository:
+    """Поповнення накопичень і їхні частини (Q156). Залишки тут не перевіряються.
+
+    Транзакцію відкриває сервіс: заголовок і частини поповнення змінюються в ній
+    разом, тож стану «поповнення без частин» назовні не буває.
+    """
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def insert(self, replenishment: Replenishment) -> int:
+        cursor = self._connection.execute(
+            f"INSERT INTO replenishments ({_REPLENISHMENT_COLUMNS}) VALUES (?, ?, ?, ?, ?)",
+            (
+                replenishment.id,
+                str(replenishment.month),
+                replenishment.name,
+                replenishment.description,
+                replenishment.accumulation_id,
+            ),
+        )
+        replenishment_id = int(cursor.lastrowid)
+        self._insert_parts(replenishment_id, replenishment.parts)
+        return replenishment_id
+
+    def replace(self, replenishment: Replenishment) -> None:
+        """Повна заміна структури наявного поповнення: отримувач, назва, опис, частини.
+
+        Місяць і ідентифікатор не змінюються. Виконується лише всередині транзакції
+        сервісу, щоб старі частини й нові записувалися однією зміною.
+        """
+        if not self._connection.in_transaction:
+            raise RuntimeError("Заміна частин поповнення можлива лише всередині транзакції")
+        self._connection.execute(
+            "UPDATE replenishments SET name = ?, description = ?, accumulation_id = ? WHERE id = ?",
+            (
+                replenishment.name,
+                replenishment.description,
+                replenishment.accumulation_id,
+                replenishment.id,
+            ),
+        )
+        self._connection.execute(
+            "DELETE FROM replenishment_parts WHERE replenishment_id = ?", (replenishment.id,)
+        )
+        self._insert_parts(replenishment.id, replenishment.parts)
+
+    def get(self, replenishment_id: int) -> Replenishment | None:
+        row = self._connection.execute(
+            f"SELECT {_REPLENISHMENT_COLUMNS} FROM replenishments WHERE id = ?",
+            (replenishment_id,),
+        ).fetchone()
+        return self._replenishment(row) if row else None
+
+    def list_for_month(self, month: CalendarMonth) -> list[Replenishment]:
+        rows = self._connection.execute(
+            f"SELECT {_REPLENISHMENT_COLUMNS} FROM replenishments WHERE month = ? ORDER BY id DESC",
+            (str(month),),
+        ).fetchall()
+        return [self._replenishment(row) for row in rows]
+
+    def list_for_accumulation(self, accumulation_id: int) -> list[Replenishment]:
+        rows = self._connection.execute(
+            f"SELECT {_REPLENISHMENT_COLUMNS} FROM replenishments WHERE accumulation_id = ?"
+            " ORDER BY month DESC, id DESC",
+            (accumulation_id,),
+        ).fetchall()
+        return [self._replenishment(row) for row in rows]
+
+    def update_metadata(self, replenishment_id: int, name: str, description: str | None) -> None:
+        self._connection.execute(
+            "UPDATE replenishments SET name = ?, description = ? WHERE id = ?",
+            (name, description, replenishment_id),
+        )
+
+    def delete(self, replenishment_id: int) -> None:
+        """Видаляє поповнення; частини видаляє ``ON DELETE CASCADE``."""
+        self._connection.execute("DELETE FROM replenishments WHERE id = ?", (replenishment_id,))
+
+    def _insert_parts(self, replenishment_id: int, parts: tuple[ReplenishmentPart, ...]) -> None:
+        self._connection.executemany(
+            "INSERT INTO replenishment_parts"
+            " (replenishment_id, source_kind, source_income_id, amount) VALUES (?, ?, ?, ?)",
+            [
+                (replenishment_id, p.source.kind.value, p.source.income_id, p.amount.kopiyky)
+                for p in parts
+            ],
+        )
+
+    def _replenishment(self, row: tuple) -> Replenishment:
+        replenishment_id, month, name, description, accumulation_id = row
+        parts = self._connection.execute(
+            "SELECT source_kind, source_income_id, amount FROM replenishment_parts"
+            " WHERE replenishment_id = ? ORDER BY id",
+            (replenishment_id,),
+        ).fetchall()
+        return Replenishment(
+            replenishment_id,
+            CalendarMonth.parse(month),
+            name,
+            description,
+            accumulation_id,
+            tuple(
+                ReplenishmentPart(SourceRef(SourceKind(kind), income_id), Money(amount))
+                for kind, income_id, amount in parts
+            ),
+        )
 
 
 def _debt(row: tuple) -> Debt:
