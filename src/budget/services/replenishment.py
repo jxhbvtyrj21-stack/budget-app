@@ -36,6 +36,22 @@ from budget.storage.repositories import (
 from budget.storage.transaction import transaction
 
 
+class RecipientBalanceError(DomainRuleError):
+    """Зміна зробила б залишок накопичення-отримувача від'ємним.
+
+    Частину коштів поповнення вже витрачено з накопичення; від'ємних залишків джерел
+    не буває (ADR 0003, ADR 0011 Q171). Суми форматує інтерфейс.
+    """
+
+    def __init__(self, name: str, balance: Money, reduction: Money) -> None:
+        self.name = name
+        self.balance = balance
+        self.reduction = reduction
+        super().__init__(
+            f"Зміну не можна зберегти: залишок накопичення «{name}» став би від'ємним."
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ReplenishmentView:
     replenishment: Replenishment
@@ -162,7 +178,93 @@ class ReplenishmentService:
             self._draw(replenishment)
         return self.get(replenishment_id)
 
+    def update(
+        self,
+        replenishment_id: int,
+        name: str,
+        description: str | None,
+        accumulation_id: int,
+        parts: Sequence[ReplenishmentPart],
+    ) -> ReplenishmentView:
+        """Змінює поповнення поточного місяця (ADR 0011 Q171, ADR 0012 Q175, Q177).
+
+        Зміна лише назви чи опису — метадані: залишки не змінюються, дозволено й для
+        поповнення архівованого накопичення (Q191). Зміна отримувача, набору джерел чи
+        сум перевіряється цілком до запису; старий ефект знімається й новий
+        застосовується однією транзакцією. Не зберігається зміна, що повернула б кошти
+        архівованому доходу (Q174), змінює операцію архівованого накопичення (Q189) чи
+        робить залишок накопичення від'ємним.
+        """
+        require_normal_operation(self._connection)
+        with transaction(self._connection):
+            old = self._current_month_replenishment(replenishment_id)
+            new = Replenishment(old.id, old.month, name, description, accumulation_id, tuple(parts))
+            if new.accumulation_id == old.accumulation_id and new.parts == old.parts:
+                self._replenishments.update_metadata(old.id, new.name, new.description)
+            else:
+                self._require_recipient_changeable(old.accumulation_id)
+                if new.accumulation_id != old.accumulation_id:
+                    self._require_recipient(new.accumulation_id)
+                old_totals = old.totals_by_source()
+                self._require_no_income_revival(old_totals, new.totals_by_source())
+                self._require_sources(new, released=old_totals)
+                self._require_recipient_not_negative(old, new)
+                self._release(old)
+                self._replenishments.replace(new)
+                self._draw(new)
+        return self.get(replenishment_id)
+
+    def delete(self, replenishment_id: int) -> None:
+        """Видаляє поповнення поточного місяця й повертає кошти джерелам (Q171).
+
+        Заблоковано, якщо це повернуло б кошти архівованому доходу (Q174), якщо
+        отримувач в архіві (Q189) або якщо залишок отримувача став би від'ємним.
+        """
+        require_normal_operation(self._connection)
+        with transaction(self._connection):
+            old = self._current_month_replenishment(replenishment_id)
+            self._require_recipient_changeable(old.accumulation_id)
+            self._require_no_income_revival(old.totals_by_source(), {})
+            self._require_recipient_not_negative(old, None)
+            self._release(old)
+            self._replenishments.delete(old.id)
+
     # Допоміжне -------------------------------------------------------------------------
+
+    def _current_month_replenishment(self, replenishment_id: int) -> Replenishment:
+        replenishment = self._replenishments.get(replenishment_id)
+        if replenishment is None:
+            raise DomainRuleError("Поповнення не знайдено.")
+        if replenishment.month != current_month(self._clock):
+            raise DomainRuleError(HISTORICAL_READ_ONLY)
+        return replenishment
+
+    def _require_no_income_revival(
+        self, old_totals: dict[SourceRef, Money], new_totals: dict[SourceRef, Money]
+    ) -> None:
+        """Q174: частину з архівованого доходу не можна зменшити чи прибрати."""
+        for source, old_total in old_totals.items():
+            if source.kind is SourceKind.INCOME:
+                if new_totals.get(source, Money.zero()) < old_total:
+                    self._ledger.require_income_not_revived(source.income_id)
+
+    def _require_recipient_not_negative(
+        self, old: Replenishment, new: Replenishment | None
+    ) -> None:
+        """Після зміни чи видалення залишок старого отримувача не стає від'ємним."""
+        accumulation = self._accumulations.get(old.accumulation_id)
+        balance = self._balances.accumulation_balance(accumulation)
+        kept = new.total if new is not None and new.accumulation_id == old.accumulation_id else None
+        reduction = old.total - (kept or Money.zero())
+        if (balance - reduction).is_negative:
+            raise RecipientBalanceError(accumulation.name, balance, reduction)
+
+    def _release(self, replenishment: Replenishment) -> None:
+        """Знімає фінансовий ефект поповнення з нерозподіленого залишку перед заміною чи
+        видаленням; доходи й накопичення отримують кошти назад через зняття частин."""
+        released = replenishment.totals_by_source().get(SourceRef(SourceKind.GENERAL_REMAINDER))
+        if released is not None:
+            self._ledger.credit_general_remainder(released)
 
     def _require_recipient(self, accumulation_id: int) -> Accumulation:
         """Отримувач нового фінансового ефекту — наявне неархівоване накопичення (Q187)."""
