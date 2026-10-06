@@ -6,7 +6,7 @@
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
-from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QWidget
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QMainWindow, QStackedWidget, QWidget
 
 from budget.services.facade import AppServices
 from budget.ui.components.sidebar import Sidebar
@@ -44,7 +44,24 @@ class MainWindow(QMainWindow):
         self.wizard: SetupWizardPage | None = None
         self._routes: dict[str, QWidget] = {}
         self._shortcuts: list[QShortcut] = []
-        if services.setup.is_completed():
+        self._build_for_services()
+
+    def replace_services(self, services: AppServices) -> None:
+        """Замінює граф сервісів: старий стає недосяжним з вікна, вміст будується заново.
+
+        Відкриті діалоги (вони тримають старі сервіси) відхиляються — код після їхнього
+        ``exec()`` нічого не робить; незбережене введення не відновлюється. Старий
+        центральний віджет зі сторінками знищує Qt (``deleteLater``). Базу вікно не
+        відкриває й не закриває — цим володіє ``ApplicationSession``.
+        """
+        for dialog in self.findChildren(QDialog):
+            if dialog.isVisible():
+                dialog.reject()
+        self._services = services
+        self._build_for_services()
+
+    def _build_for_services(self) -> None:
+        if self._services.setup.is_completed():
             self._build_normal()
         else:
             self._build_setup()
@@ -56,8 +73,13 @@ class MainWindow(QMainWindow):
             shortcut.setParent(None)
         self._shortcuts.clear()
         self._routes.clear()
+        # Жодна сторінка попереднього вмісту (і її сервіси) не лишається досяжною з вікна.
         self.sidebar = None
         self.wizard = None
+        self.overview = None
+        self.month = None
+        self.accumulations = None
+        self.debts = None
         self.service = None
         self.pages = QStackedWidget()
         central = QWidget()
