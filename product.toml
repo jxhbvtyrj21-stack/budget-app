@@ -1,0 +1,11 @@
+# Єдине джерело ідентичності продукту (A-7, A-31, ADR 0015).
+# Значення не дублюються в коді, скриптах інсталятора чи CI.
+
+[product]
+name = "Budget"
+publisher = "Budget"
+app_id = "5534B0BB-9852-4C19-8043-7486FC92928A"
+app_user_model_id = "Budget.Budget"
+executable_name = "Budget"
+installer_base_name = "Budget-Setup"
+data_directory_name = "Budget"

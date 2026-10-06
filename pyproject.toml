@@ -1,0 +1,43 @@
+[project]
+name = "budget"
+version = "0.1.0"
+description = "Desktop-застосунок для Windows для керування персональним бюджетом"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "PySide6-Essentials>=6.7",
+    # Windows не має системної бази часових поясів; потрібна для Europe/Kyiv (zoneinfo).
+    "tzdata; sys_platform == 'win32'",
+]
+
+[project.scripts]
+budget = "budget.__main__:run"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-qt>=4.4",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/budget"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyside6"
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+# Українські тексти: кирилиця не є «неоднозначними» символами.
+ignore = ["RUF001", "RUF002", "RUF003"]
