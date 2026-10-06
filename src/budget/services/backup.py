@@ -17,7 +17,7 @@ from pathlib import Path
 from budget.domain.calendar import CalendarMonth, Clock
 from budget.errors import DatabaseCorruptedError, StorageError
 from budget.storage.backup import backup_database
-from budget.storage.recovery import quarantine_database, restore_from_backup
+from budget.storage.recovery import quarantine_database, restore_from_backup, verify_backup
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +78,41 @@ def newest_first(backups: list[BackupInfo]) -> list[BackupInfo]:
     return sorted(backups, key=lambda b: (b.created, b.path.name), reverse=True)
 
 
+def find_backups(backups_dir: Path) -> list[BackupInfo]:
+    """Розпізнані за назвою копії від найновішої; нерозпізнані файли не враховуються."""
+    if not backups_dir.is_dir():
+        return []
+    found = (parse_backup_name(p) for p in backups_dir.glob(f"budget-*{BACKUP_SUFFIX}"))
+    return newest_first([b for b in found if b is not None and b.path.is_file()])
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreCandidate:
+    """Копія, придатна для відновлення: пройшла повну перевірку цілісності."""
+
+    backup: BackupInfo
+    size: int  # байти
+
+
+def restore_candidates(backups_dir: Path) -> list[RestoreCandidate]:
+    """Справні копії всіх видів від найновішої (DS-6; IA 10.1).
+
+    Кожна копія відкривається лише для читання й проходить ``integrity_check``;
+    пошкоджені не пропонуються. Нічого не видаляється й не змінюється.
+    """
+    candidates = []
+    for backup in find_backups(backups_dir):
+        if not verify_backup(backup.path):
+            log.warning("Копія %s не пройшла перевірку й не пропонується", backup.path.name)
+            continue
+        try:
+            size = backup.path.stat().st_size
+        except OSError:
+            continue
+        candidates.append(RestoreCandidate(backup, size))
+    return candidates
+
+
 @dataclass(frozen=True, slots=True)
 class RotationPolicy:
     """Автоматичний пул копій: одна копія на календарний період, зберігається ``keep``."""
@@ -122,10 +157,7 @@ class BackupService:
 
     def backups(self) -> list[BackupInfo]:
         """Розпізнані копії від найновішої; нерозпізнані файли не враховуються."""
-        if not self._backups_dir.is_dir():
-            return []
-        found = (parse_backup_name(p) for p in self._backups_dir.glob(f"budget-*{BACKUP_SUFFIX}"))
-        return newest_first([b for b in found if b is not None])
+        return find_backups(self._backups_dir)
 
     def list_backups(self) -> list[Path]:
         return [b.path for b in self.backups()]
