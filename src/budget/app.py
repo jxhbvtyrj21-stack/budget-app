@@ -14,7 +14,6 @@ from budget.platform.identity import ProductIdentity, load_product_identity
 from budget.platform.paths import DataPaths, data_paths
 from budget.platform.resources import assets_dir
 from budget.services.backup import RecoveryService
-from budget.services.setup import InitialSetupService
 from budget.services.startup import prepare_database
 from budget.storage.integrity import quick_check
 
@@ -63,10 +62,14 @@ def open_application_database(paths: DataPaths, clock: Clock) -> sqlite3.Connect
     return prepare_database(paths.database, paths.backups, clock)
 
 
-def build_main_window(identity: ProductIdentity, connection: sqlite3.Connection):
-    """Створює головне вікно з темою; фінансові екрани — лише після налаштування."""
+def build_main_window(identity: ProductIdentity, connection: sqlite3.Connection, clock: Clock):
+    """Створює головне вікно з темою; фінансові екрани — лише після налаштування.
+
+    Перед побудовою виконується перехід між місяцями для доходів (ADR 0009).
+    """
     from PySide6.QtWidgets import QApplication
 
+    from budget.services.facade import AppServices
     from budget.ui.main_window import MainWindow
     from budget.ui.theme.stylesheet import build_stylesheet
     from budget.ui.theme.typography import register_fonts
@@ -74,8 +77,9 @@ def build_main_window(identity: ProductIdentity, connection: sqlite3.Connection)
     application = QApplication.instance()
     families = register_fonts(assets_dir() / "fonts")
     application.setStyleSheet(build_stylesheet(families))
-    setup_completed = InitialSetupService(connection).is_completed()
-    return MainWindow(identity.name, setup_completed)
+    services = AppServices.create(connection, clock)
+    services.transitions.run_on_startup()
+    return MainWindow(identity.name, services)
 
 
 def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
@@ -102,8 +106,10 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
         log.exception("Startup failed")
         _show_message(identity.name, exc.user_message)
         return EXIT_STARTUP_FAILED
-    window = build_main_window(identity, connection)
+    window = build_main_window(identity, connection, clock)
     window.show()
+    # Спеціальний діалог після тривалої перерви: один, без автоматичного вибору.
+    window.open_long_gap_dialog()
     try:
         return application.exec()
     finally:

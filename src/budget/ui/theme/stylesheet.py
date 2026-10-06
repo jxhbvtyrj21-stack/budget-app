@@ -59,6 +59,24 @@ QLineEdit {{
 QLineEdit:focus {{ border: 2px solid {r["focus-ring"]}; }}
 QLineEdit:disabled {{ background: {r["surface-sunken"]}; color: {r["text-disabled"]}; }}
 QLabel[tone="muted"] {{ color: {r["text-muted"]}; }}
+QLabel[tone="error"] {{ color: {r["danger-text"]}; font-size: 12px; }}
+QLabel[tone="primary"] {{ color: {r["primary"]}; }}
+QPushButton[variant="text"] {{
+    background: transparent; color: {r["primary"]}; border: none; padding: 0; font-weight: 600;
+}}
+QPushButton[variant="danger-text"] {{
+    background: transparent; color: {r["danger-text"]}; border: none; padding: 0;
+}}
+#Notice {{
+    background: {r["notice-soft"]}; border-left: 3px solid {r["notice-border"]};
+    border-radius: {RADII["sm"]}px;
+}}
+#ErrorNotice {{
+    background: {r["danger-soft"]}; border-left: 3px solid {r["danger"]};
+    border-radius: {RADII["sm"]}px;
+}}
+#ListRow {{ border-bottom: 1px solid {r["divider"]}; }}
+QDialog {{ background: {r["surface"]}; }}
 """,
     ]
     for role in TYPE_SCALE:
