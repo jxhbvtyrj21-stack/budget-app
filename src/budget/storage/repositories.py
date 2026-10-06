@@ -148,6 +148,35 @@ class AccumulationRepository:
         )
         return [_accumulation(row) for row in rows]
 
+    def list_by_archived(self, archived: bool) -> list[Accumulation]:
+        rows = self._connection.execute(
+            "SELECT id, name, description, target, status, archived, initial_balance"
+            " FROM accumulations WHERE archived = ? ORDER BY id",
+            (int(archived),),
+        )
+        return [_accumulation(row) for row in rows]
+
+    def update_metadata(
+        self, accumulation_id: int, name: str, description: str | None, target: Money | None
+    ) -> None:
+        """Назва, опис і цільова сума — метадані (Q184, ADR 0022); залишок не змінюється."""
+        self._connection.execute(
+            "UPDATE accumulations SET name = ?, description = ?, target = ? WHERE id = ?",
+            (name, description, target.kopiyky if target is not None else None, accumulation_id),
+        )
+
+    def set_status(self, accumulation_id: int, status: AccumulationStatus) -> None:
+        self._connection.execute(
+            "UPDATE accumulations SET status = ? WHERE id = ?", (status.value, accumulation_id)
+        )
+
+    def set_archived(self, accumulation_id: int, archived: bool) -> None:
+        self._connection.execute(
+            "UPDATE accumulations SET archived = ? WHERE id = ?", (int(archived), accumulation_id)
+        )
+
+    # Фізичного видалення накопичення немає (ADR 0007, п. 13; ADR 0012, Q185).
+
     def movement_total(self, accumulation_id: int) -> Money:
         """Поповнення мінус витрати й погашення з накопичення (без початкового балансу)."""
         (total,) = self._connection.execute(
@@ -215,6 +244,15 @@ class ExpenseRepository:
         rows = self._connection.execute(
             f"SELECT {_EXPENSE_COLUMNS} FROM expenses WHERE month = ? ORDER BY id DESC",
             (str(month),),
+        )
+        return [_expense(row) for row in rows]
+
+    def list_for_accumulation(self, accumulation_id: int) -> list[Expense]:
+        """Витрати, джерелом яких є накопичення, — для історії в картці накопичення."""
+        rows = self._connection.execute(
+            f"SELECT {_EXPENSE_COLUMNS} FROM expenses WHERE source_accumulation_id = ?"
+            " ORDER BY month DESC, id DESC",
+            (accumulation_id,),
         )
         return [_expense(row) for row in rows]
 

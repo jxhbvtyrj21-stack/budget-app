@@ -4,6 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from budget.domain.calendar import Clock
+from budget.services.accumulation import AccumulationService
 from budget.services.balances import BalanceService
 from budget.services.expense import ExpenseService
 from budget.services.income import IncomeService
@@ -16,6 +17,7 @@ class AppServices:
     setup: InitialSetupService
     incomes: IncomeService
     expenses: ExpenseService
+    accumulations: AccumulationService
     balances: BalanceService
     months: MonthService
     transitions: MonthTransitionService
@@ -26,6 +28,7 @@ class AppServices:
             setup=InitialSetupService(connection, clock),
             incomes=IncomeService(connection, clock),
             expenses=ExpenseService(connection, clock),
+            accumulations=AccumulationService(connection, clock),
             balances=BalanceService(connection),
             months=MonthService(clock),
             transitions=MonthTransitionService(connection, clock),

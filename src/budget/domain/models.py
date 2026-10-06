@@ -106,6 +106,41 @@ class AccumulationStatus(StrEnum):
     CLOSED = "closed"
 
 
+# Ручні переходи статусів (ADR 0007, п. 14). «Закрите» ще потребує нульового залишку,
+# а архівоване накопичення статусу не змінює (Q188) — це перевіряє сервіс.
+ACCUMULATION_TRANSITIONS: dict[AccumulationStatus, tuple[AccumulationStatus, ...]] = {
+    AccumulationStatus.ACTIVE: (AccumulationStatus.REACHED, AccumulationStatus.CLOSED),
+    AccumulationStatus.REACHED: (AccumulationStatus.ACTIVE, AccumulationStatus.CLOSED),
+    AccumulationStatus.CLOSED: (AccumulationStatus.ACTIVE,),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class TargetProgress:
+    """Прогрес до цільової суми — похідний показник, не бізнес-значення (ADR 0007, п. 15)."""
+
+    balance: Money
+    target: Money
+
+    @property
+    def percent(self) -> int:
+        """Ціла частина відсотка; понад ціль може перевищувати 100."""
+        return self.balance.kopiyky * 100 // self.target.kopiyky
+
+    @property
+    def excess(self) -> Money:
+        """На скільки залишок перевищує ціль (0, якщо не перевищує)."""
+        difference = self.balance - self.target
+        return difference if difference.is_positive else Money.zero()
+
+
+def target_progress(balance: Money, target: Money | None) -> TargetProgress | None:
+    """Прогрес лише для додатної цільової суми: без цілі чи з нульовою — ділення немає."""
+    if target is None or not target.is_positive:
+        return None
+    return TargetProgress(balance, target)
+
+
 @dataclass(frozen=True, slots=True)
 class Accumulation:
     """Накопичення: залишок похідний (початковий баланс + поповнення − витрати − погашення).

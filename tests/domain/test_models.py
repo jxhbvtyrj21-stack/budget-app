@@ -2,6 +2,7 @@ import pytest
 
 from budget.domain.calendar import CalendarMonth
 from budget.domain.models import (
+    ACCUMULATION_TRANSITIONS,
     Accumulation,
     AccumulationStatus,
     Debt,
@@ -13,6 +14,7 @@ from budget.domain.models import (
     SourceRef,
     debt_status,
     income_status,
+    target_progress,
 )
 from budget.domain.money import Money
 from budget.errors import DomainRuleError, ValidationError
@@ -58,3 +60,21 @@ def test_derived_statuses():
     assert income_status(Money.zero()).value == "completed"
     assert income_status(Money(1)).value == "active"
     assert debt_status(Money.zero()).value == "paid"
+
+
+def test_target_progress_is_derived_and_safe_without_target():
+    assert target_progress(Money(5_000), None) is None
+    assert target_progress(Money(5_000), Money.zero()) is None
+    half = target_progress(Money(5_000), Money(10_000))
+    assert (half.percent, half.excess) == (50, Money.zero())
+    over = target_progress(Money(10_500), Money(10_000))
+    assert (over.percent, over.excess) == (105, Money(500))
+
+
+def test_accumulation_transition_graph():
+    active, reached, closed = AccumulationStatus
+    assert ACCUMULATION_TRANSITIONS == {
+        active: (reached, closed),
+        reached: (active, closed),
+        closed: (active,),
+    }
