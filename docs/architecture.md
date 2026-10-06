@@ -171,7 +171,7 @@ Hex-коди з Додатка C — **попередні дизайн-токе�
 
 ### 5.1. Цільова структура репозиторію
 
-> Цільова структура. Створено поки лише `README.md` і `docs/`.
+> Цільова структура. Створено каркас `src/budget/` (domain, storage, services, ui, platform), `tests/`, `product.toml`, `pyproject.toml`, `assets/fonts/`, `packaging/licenses/` і `.github/workflows/ci.yml`; `packaging/pyinstaller`, `packaging/inno`, `assets/icon` і `release.yml` ще не створено.
 
 ```
 budget-app/
