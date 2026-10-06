@@ -116,7 +116,7 @@ def test_invalid_and_unknown_files_are_not_shown(window, paths):
     good = sorted(paths.backups.iterdir())[0]
     (paths.backups / "budget-20261005-120000-daily.db").write_bytes(b"broken" * 500)
     (paths.backups / "budget-20261004-120000-manual.db").write_bytes(good.read_bytes())
-    (paths.backups / "notes.txt").write_text("не копія")
+    (paths.backups / "notes.txt").write_text("не копія", encoding="utf-8")
     window.navigate("service")
     assert len(rows(window.service)) == 3  # лише справні автоматичні копії
     assert {p.name for p in paths.backups.iterdir()} >= {
