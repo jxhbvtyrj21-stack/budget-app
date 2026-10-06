@@ -124,6 +124,59 @@ class ExpenseService:
             expense_id = self._apply(expense)
         return self.get(expense_id)
 
+    def update(
+        self,
+        expense_id: int,
+        name: str,
+        description: str | None,
+        amount: Money,
+        source: SourceRef,
+    ) -> ExpenseView:
+        """Змінює витрату поточного місяця: суму, назву, опис, джерело (Q169).
+
+        Назва й опис — метадані: їх можна змінити й тоді, коли фінансово операція
+        заблокована (Q191). Зміна суми чи джерела знімає старий фінансовий ефект і
+        застосовує новий в одній транзакції; недопустима нова конфігурація не
+        зберігається, а стара витрата лишається без змін.
+        """
+        require_normal_operation(self._connection)
+        with transaction(self._connection):
+            old = self._current_month_expense(expense_id)
+            new = Expense(old.id, old.month, name, description, amount, source)
+            if new.amount == old.amount and new.source == old.source:
+                self._expenses.update_metadata(old.id, new.name, new.description)
+            else:
+                self._ledger.require_financially_changeable(old.source)
+                self._revert(old)
+                self._apply(new)
+        return self.get(expense_id)
+
+    def delete(self, expense_id: int) -> None:
+        """Видаляє витрату поточного місяця й повертає кошти джерелу (ADR 0010, Q154).
+
+        Видалення, що повернуло б кошти архівованому доходу, заблоковане (Q168);
+        витрату з архівованого накопичення до розархівування не видаляють (Q189).
+        """
+        require_normal_operation(self._connection)
+        with transaction(self._connection):
+            old = self._current_month_expense(expense_id)
+            self._ledger.require_financially_changeable(old.source)
+            self._revert(old)
+
+    def _current_month_expense(self, expense_id: int) -> Expense:
+        expense = self._expenses.get(expense_id)
+        if expense is None:
+            raise DomainRuleError("Витрату не знайдено.")
+        if expense.month != current_month(self._clock):
+            raise DomainRuleError(HISTORICAL_READ_ONLY)
+        return expense
+
+    def _revert(self, expense: Expense) -> None:
+        """Знімає фінансовий ефект витрати в поточній транзакції (лише повертає кошти)."""
+        self._expenses.delete(expense.id)
+        if expense.source.kind is SourceKind.GENERAL_REMAINDER:
+            self._ledger.credit_general_remainder(expense.amount)
+
     def _apply(self, expense: Expense) -> int:
         """Перевіряє обране джерело й записує витрату в поточній транзакції."""
         self._ledger.require_available(expense.source, expense.amount)
