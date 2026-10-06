@@ -5,7 +5,7 @@ import logging
 import sqlite3
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from budget.domain.calendar import Clock, SystemClock
@@ -15,7 +15,7 @@ from budget.platform.paths import DataPaths, data_paths
 from budget.platform.resources import assets_dir
 from budget.services.backup import BackupService, RecoveryService, RestoreError
 from budget.services.startup import prepare_database
-from budget.storage.integrity import quick_check
+from budget.storage.integrity import corruption_code, quick_check
 
 log = logging.getLogger(__name__)
 
@@ -116,6 +116,72 @@ class ApplicationSession:
     def _require_closed(self) -> None:
         if self._connection is not None:
             raise RuntimeError("Сесія вже має відкриту базу; спершу закрийте її")
+
+
+class RuntimeCorruptionGuard:
+    """Розпізнає пошкодження бази під час роботи застосунку (Block C3).
+
+    Спільна точка входу ``handle_runtime_corruption`` викликається з ``sys.excepthook``
+    (неперехоплений виняток зі слоту Qt) і з ``_run_gui`` до запуску циклу подій.
+    Пошкодження визначає ``storage.integrity.corruption_code`` (лише код SQLite).
+    Усе інше обробник не чіпає: передає попередньому ``sys.excepthook``. Перше
+    пошкодження записується в журнал один раз і передається ``on_corruption`` через
+    ``QTimer.singleShot(0)`` — поза слотом, де воно виникло. Наступні не запускають
+    другого відновлення. Стан належить екземпляру, створеному в ``_run_gui``.
+    """
+
+    def __init__(self, on_corruption: Callable[[BaseException], None]) -> None:
+        self._on_corruption = on_corruption
+        self._previous_hook = None
+        self._detected = False
+
+    @property
+    def detected(self) -> bool:
+        """RUNTIME_CORRUPTION_DETECTED: відновлення вже очікується."""
+        return self._detected
+
+    def handle_runtime_corruption(self, error: BaseException, *, schedule: bool) -> bool:
+        """``True``, якщо ``error`` — пошкодження бази; ``schedule`` — цикл подій працює."""
+        code = corruption_code(error)
+        if code is None:
+            return False
+        if self._detected:
+            log.info("Repeated database corruption error while recovery is pending")
+            return True
+        self._detected = True
+        log.error(
+            "Database corruption detected at runtime: sqlite code %s, %s",
+            code,
+            type(error).__name__,
+        )
+        if schedule:
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, lambda: self._on_corruption(error))
+        return True
+
+    def __enter__(self) -> "RuntimeCorruptionGuard":
+        self._previous_hook = sys.excepthook
+        sys.excepthook = self._excepthook
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        if sys.excepthook == self._excepthook:
+            sys.excepthook = self._previous_hook
+        self._previous_hook = None
+
+    def _excepthook(self, exc_type, error, traceback) -> None:
+        if not self.handle_runtime_corruption(error, schedule=True):
+            self._previous_hook(exc_type, error, traceback)
+
+
+def _suspend_ui_for_recovery(error: BaseException) -> None:
+    """Поки відновлення не виконано (C4–C6), звичайна робота з пошкодженою базою зупинена:
+    усі вікна застосунку стають неактивними."""
+    from PySide6.QtWidgets import QApplication
+
+    for widget in QApplication.topLevelWidgets():
+        widget.setEnabled(False)
 
 
 def restore_and_open(paths: DataPaths, clock: Clock, backup_path: Path) -> sqlite3.Connection:
@@ -238,15 +304,38 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
     exit_code, restored = start_session(identity, session, paths, clock)
     if exit_code is not None:
         return exit_code
+    guard = RuntimeCorruptionGuard(_suspend_ui_for_recovery)
     try:
         # Посилання тримає вікно живим до кінця циклу подій.
-        window = show_main_window(  # noqa: F841
-            identity, session.connection, clock, paths.backups, restored=restored
-        )
-        return application.exec()
+        window = show_window_or_report(identity, session, clock, paths, restored, guard)
+        if window is None:
+            return EXIT_DATA_CORRUPTED
+        with guard:
+            return application.exec()
     finally:
         session.close()
         lock.unlock()
+
+
+def show_window_or_report(
+    identity: ProductIdentity,
+    session: ApplicationSession,
+    clock: Clock,
+    paths: DataPaths,
+    restored: bool,
+    guard: RuntimeCorruptionGuard,
+):
+    """Показує головне вікно. Пошкодження бази до запуску циклу подій — ``None``:
+    ``guard`` фіксує його (контрольований вихід; відновлення — C5). Інші помилки
+    SQLite не перехоплюються."""
+    try:
+        return show_main_window(
+            identity, session.connection, clock, paths.backups, restored=restored
+        )
+    except sqlite3.Error as exc:
+        if not guard.handle_runtime_corruption(exc, schedule=False):
+            raise
+        return None
 
 
 def start_session(
