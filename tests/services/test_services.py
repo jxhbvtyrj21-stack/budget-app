@@ -5,7 +5,7 @@ import pytest
 from budget.domain.calendar import CalendarMonth, FixedClock
 from budget.domain.models import SetupStatus
 from budget.errors import DatabaseCorruptedError, DomainRuleError
-from budget.services.backup import BackupService, RecoveryService
+from budget.services.backup import BackupKind, BackupService, RecoveryService
 from budget.services.month import MonthService
 from budget.services.setup import InitialSetupService, require_normal_operation
 from budget.services.startup import prepare_database
@@ -81,6 +81,6 @@ def test_month_service_uses_clock():
 
 def test_backup_service(connection, paths):
     service = BackupService(connection, paths[1], CLOCK)
-    backup = service.create_backup("manual")
-    assert backup.name == "budget-20261006-120000-manual.db"
+    backup = service.create_backup(BackupKind.ON_DEMAND)
+    assert backup.name == "budget-20261006-120000-on-demand.db"
     assert service.list_backups() == [backup]

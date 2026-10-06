@@ -5,7 +5,7 @@ from pathlib import Path
 
 from budget.domain.calendar import Clock
 from budget.errors import DatabaseCorruptedError
-from budget.services.backup import BackupService
+from budget.services.backup import BackupKind, BackupService
 from budget.storage.database import open_database
 from budget.storage.integrity import quick_check
 from budget.storage.migrations import migrate, schema_version
@@ -25,7 +25,7 @@ def prepare_database(database_path: Path, backups_dir: Path, clock: Clock) -> sq
 
         def backup_before(version: int) -> None:
             if schema_version(connection) > 0:
-                backups.create_backup(f"before-migration-{version}")
+                backups.create_backup(BackupKind.BEFORE_MIGRATION, version)
 
         migrate(connection, before_migration=backup_before)
     except BaseException:
