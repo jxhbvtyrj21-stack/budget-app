@@ -7,10 +7,19 @@
 import sqlite3
 from dataclasses import dataclass
 
-from budget.domain.models import Accumulation, Income, IncomeStatus, income_status
+from budget.domain.models import (
+    Accumulation,
+    Debt,
+    DebtStatus,
+    Income,
+    IncomeStatus,
+    debt_status,
+    income_status,
+)
 from budget.domain.money import Money
 from budget.storage.repositories import (
     AccumulationRepository,
+    DebtRepository,
     GeneralRemainderRepository,
     IncomeRepository,
 )
@@ -24,6 +33,22 @@ class IncomeView:
     @property
     def status(self) -> IncomeStatus:
         return income_status(self.balance)
+
+
+@dataclass(frozen=True, slots=True)
+class DebtView:
+    """Борг і його похідні значення: погашено, залишок, статус (ADR 0018, п. 4)."""
+
+    debt: Debt
+    repaid: Money
+
+    @property
+    def remaining(self) -> Money:
+        return self.debt.amount - self.repaid
+
+    @property
+    def status(self) -> DebtStatus:
+        return debt_status(self.remaining)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +69,7 @@ class BalanceService:
         self._incomes = IncomeRepository(connection)
         self._accumulations = AccumulationRepository(connection)
         self._remainder = GeneralRemainderRepository(connection)
+        self._debts = DebtRepository(connection)
 
     def general_remainder(self) -> Money:
         return self._remainder.get()
@@ -60,6 +86,25 @@ class BalanceService:
         if accumulation.id is None:
             raise ValueError("Накопичення ще не збережено")
         return accumulation.initial_balance + self._accumulations.movement_total(accumulation.id)
+
+    def debt_view(self, debt: Debt) -> DebtView:
+        """Залишок боргу = сума боргу − погашення; статус похідний і не зберігається."""
+        if debt.id is None:
+            raise ValueError("Борг ще не збережено")
+        return DebtView(debt, self._debts.repaid_total(debt.id))
+
+    def debt_remaining(self, debt: Debt) -> Money:
+        return self.debt_view(debt).remaining
+
+    def active_debts_total(self) -> Money:
+        """Загальний залишок активних боргів — окремий показник, не частина
+        загальної доступної суми (ADR 0018, п. 8)."""
+        total = Money.zero()
+        for debt in self._debts.list_all():
+            remaining = self.debt_remaining(debt)
+            if remaining.is_positive:
+                total = total + remaining
+        return total
 
     def available_funds(self) -> AvailableFunds:
         """Борги й базовий мінімум не віднімаються; архівовані доходи не входять;

@@ -12,6 +12,7 @@ from budget.domain.models import (
     AccumulationStatus,
     Debt,
     DebtOrigin,
+    DebtRepayment,
     Expense,
     Income,
     Replenishment,
@@ -415,11 +416,132 @@ class DebtRepository:
         )
         return [_debt(row) for row in rows]
 
+    def get(self, debt_id: int) -> Debt | None:
+        row = self._connection.execute(
+            "SELECT id, origin, month, name, description, amount FROM debts WHERE id = ?",
+            (debt_id,),
+        ).fetchone()
+        return _debt(row) if row else None
+
+    def list_for_month(self, month: CalendarMonth) -> list[Debt]:
+        """Отримання позикових коштів місяця (початкові борги місяця не мають)."""
+        rows = self._connection.execute(
+            "SELECT id, origin, month, name, description, amount FROM debts WHERE month = ?"
+            " ORDER BY id DESC",
+            (str(month),),
+        )
+        return [_debt(row) for row in rows]
+
+    def update_metadata(self, debt_id: int, name: str, description: str | None) -> None:
+        """Назва й опис — метадані боргу (ADR 0022); суми не змінюються."""
+        self._connection.execute(
+            "UPDATE debts SET name = ?, description = ? WHERE id = ?", (name, description, debt_id)
+        )
+
+    def update_amount(self, debt_id: int, amount: Money) -> None:
+        self._connection.execute(
+            "UPDATE debts SET amount = ? WHERE id = ?", (amount.kopiyky, debt_id)
+        )
+
+    def delete(self, debt_id: int) -> None:
+        """Видаляє рядок боргу; з погашеннями не дає зовнішній ключ (ON DELETE RESTRICT)."""
+        self._connection.execute("DELETE FROM debts WHERE id = ?", (debt_id,))
+
     def repaid_total(self, debt_id: int) -> Money:
         (total,) = self._connection.execute(
             "SELECT COALESCE(SUM(amount), 0) FROM debt_repayments WHERE debt_id = ?", (debt_id,)
         ).fetchone()
         return _money(total)
+
+    # Погашення ---------------------------------------------------------------------------
+
+    def insert_repayment(self, repayment: DebtRepayment) -> int:
+        """Записує погашення; ``repayment.id`` зберігається, якщо задано."""
+        cursor = self._connection.execute(
+            f"INSERT INTO debt_repayments ({_REPAYMENT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            _repayment_values(repayment),
+        )
+        return int(cursor.lastrowid)
+
+    def get_repayment(self, repayment_id: int) -> DebtRepayment | None:
+        row = self._connection.execute(
+            f"SELECT {_REPAYMENT_COLUMNS} FROM debt_repayments WHERE id = ?", (repayment_id,)
+        ).fetchone()
+        return _repayment(row) if row else None
+
+    def list_repayments_for_month(self, month: CalendarMonth) -> list[DebtRepayment]:
+        rows = self._connection.execute(
+            f"SELECT {_REPAYMENT_COLUMNS} FROM debt_repayments WHERE month = ? ORDER BY id DESC",
+            (str(month),),
+        )
+        return [_repayment(row) for row in rows]
+
+    def list_repayments_for_debt(self, debt_id: int) -> list[DebtRepayment]:
+        rows = self._connection.execute(
+            f"SELECT {_REPAYMENT_COLUMNS} FROM debt_repayments WHERE debt_id = ?"
+            " ORDER BY month DESC, id DESC",
+            (debt_id,),
+        )
+        return [_repayment(row) for row in rows]
+
+    def update_repayment_description(self, repayment_id: int, description: str | None) -> None:
+        self._connection.execute(
+            "UPDATE debt_repayments SET description = ? WHERE id = ?", (description, repayment_id)
+        )
+
+    def replace_repayment(self, repayment: DebtRepayment) -> None:
+        """Заміна суми, джерела й опису наявного погашення (борг і місяць незмінні).
+
+        Лише всередині транзакції сервісу: повернення старого списання й нове
+        списання з джерела відбуваються однією зміною.
+        """
+        if not self._connection.in_transaction:
+            raise RuntimeError("Заміна погашення можлива лише всередині транзакції")
+        self._connection.execute(
+            "UPDATE debt_repayments SET description = ?, amount = ?, source_kind = ?,"
+            " source_income_id = ?, source_accumulation_id = ? WHERE id = ?",
+            (
+                repayment.description,
+                repayment.amount.kopiyky,
+                repayment.source.kind.value,
+                repayment.source.income_id,
+                repayment.source.accumulation_id,
+                repayment.id,
+            ),
+        )
+
+    def delete_repayment(self, repayment_id: int) -> None:
+        self._connection.execute("DELETE FROM debt_repayments WHERE id = ?", (repayment_id,))
+
+
+_REPAYMENT_COLUMNS = (
+    "id, debt_id, month, description, amount, source_kind, source_income_id, source_accumulation_id"
+)
+
+
+def _repayment_values(repayment: DebtRepayment) -> tuple:
+    return (
+        repayment.id,
+        repayment.debt_id,
+        str(repayment.month),
+        repayment.description,
+        repayment.amount.kopiyky,
+        repayment.source.kind.value,
+        repayment.source.income_id,
+        repayment.source.accumulation_id,
+    )
+
+
+def _repayment(row: tuple) -> DebtRepayment:
+    repayment_id, debt_id, month, description, amount, kind, income_id, accumulation_id = row
+    return DebtRepayment(
+        repayment_id,
+        debt_id,
+        CalendarMonth.parse(month),
+        description,
+        Money(amount),
+        SourceRef(SourceKind(kind), income_id, accumulation_id),
+    )
 
 
 class FinancialRecordRepository:
