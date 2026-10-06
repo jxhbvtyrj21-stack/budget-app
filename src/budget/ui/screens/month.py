@@ -1,27 +1,31 @@
-"""Місяць (ui-information-architecture.md, розділ 5): доходи, витрати, поповнення й борги.
+"""Місяць (ui-information-architecture.md, розділ 5): підсумки, операції й рух накопичень.
 
 Поточний місяць — створення й дії рядків у межах правил ADR 0010–0014; минулі
 місяці — лише перегляд, без кнопок створення, редагування чи видалення.
 """
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHBoxLayout, QMenu, QMessageBox, QPushButton, QVBoxLayout
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QMenu, QMessageBox, QPushButton, QVBoxLayout
 
 from budget.domain.calendar import CalendarMonth
+from budget.domain.models import SourceKind
 from budget.errors import BudgetError
 from budget.services.balances import DebtView, IncomeView
 from budget.services.debt import RepaymentView
 from budget.services.expense import ExpenseView
 from budget.services.facade import AppServices
+from budget.services.month_analysis import AccumulationMovement, MonthAnalysis
 from budget.services.replenishment import ReplenishmentView
-from budget.ui.components.basic import Panel, button, text_label
+from budget.ui.components.basic import Panel, amount_label, button, text_label
 from budget.ui.components.forms import ListRow, Notice
+from budget.ui.dialogs.base_minimum_dialog import BaseMinimumDialog
 from budget.ui.dialogs.debt_dialogs import LoanReceiptDialog, RepaymentDialog
 from budget.ui.dialogs.expense_dialog import ExpenseDialog
 from budget.ui.dialogs.replenishment_dialog import ReplenishmentDialog
 from budget.ui.formatting import format_money, format_month
-from budget.ui.messages import user_text
+from budget.ui.messages import comparison_text, user_text
 from budget.ui.screens.page import Page, clear_layout
+from budget.ui.theme.tokens import SPACING
 
 
 def income_secondary(view: IncomeView) -> str:
@@ -36,6 +40,15 @@ def replenishment_secondary(view: ReplenishmentView) -> str:
     """Поповнення · у: отримувач · з: джерела (design-system.md, 9)."""
     sources = ", ".join(dict.fromkeys(view.source_names))
     return f"Поповнення · у: {view.recipient_name} · з: {sources}"
+
+
+def movement_secondary(movement: AccumulationMovement) -> str:
+    """Надходження (+), відтоки (−) і підпис чистої зміни, показаної сумою рядка."""
+    return (
+        f"Поповнення +{format_money(movement.replenished)} · витрати "
+        f"−{format_money(movement.spent)} · погашення боргів −{format_money(movement.repaid)}"
+        " · чиста зміна"
+    )
 
 
 class MonthPage(Page):
@@ -76,10 +89,13 @@ class MonthPage(Page):
         self.read_only_banner = Notice("Минулий місяць — лише перегляд")
         self.read_only_banner.setObjectName("InfoBanner")
         self.body.addWidget(self.read_only_banner)
+        self.summary = Panel()
+        self.body.addWidget(self.summary)
         self.income_rows = self._section("Доходи")
         self.expense_rows = self._section("Витрати")
         self.replenishment_rows = self._section("Поповнення накопичень")
         self.debt_rows = self._section("Борги")
+        self.movement_rows = self._section("Рух накопичень")
         self.body.addStretch(1)
         self.refresh()
 
@@ -121,6 +137,10 @@ class MonthPage(Page):
         self.new_replenishment_button.setVisible(editable)
         self.previous_button.setEnabled(self.month > self.first_month())
         self.next_button.setEnabled(self.month < current)
+
+        analysis = self._services.analysis.analyse(self.month)
+        self._fill_summary(analysis, editable)
+        self._fill_movements(analysis)
 
         clear_layout(self.income_rows)
         incomes = self._services.incomes.list_for_month(self.month)
@@ -197,6 +217,89 @@ class MonthPage(Page):
                     actions=actions,
                 )
             )
+
+    def _fill_summary(self, analysis: MonthAnalysis, editable: bool) -> None:
+        """Підсумки місяця (ADR 0020): фінансові суми окремо від базового мінімуму."""
+        body = self.summary.body
+        clear_layout(body)
+        body.addWidget(text_label("Підсумки місяця", "heading"))
+        main = QGridLayout()
+        main.setHorizontalSpacing(SPACING[6])
+        self.summary_amounts = {}
+        for column, (title, amount) in enumerate(
+            (("Доходи місяця", analysis.incomes), ("Фактичні витрати", analysis.actual_expenses))
+        ):
+            main.addWidget(text_label(title, "caption", muted=True), 0, column)
+            self.summary_amounts[title] = amount_label(amount, "amount-lg")
+            main.addWidget(self.summary_amounts[title], 1, column)
+        main.addWidget(text_label("Базовий мінімум", "caption", muted=True), 0, 2)
+        if analysis.base_minimum is None:
+            self.base_minimum_label = text_label("Базовий мінімум не задано", "body", muted=True)
+        else:
+            self.base_minimum_label = amount_label(analysis.base_minimum, "amount-lg")
+        main.addWidget(self.base_minimum_label, 1, 2)
+        self.base_minimum_button = None
+        if editable:
+            title = "Задати" if analysis.base_minimum is None else "Змінити"
+            self.base_minimum_button = button(title, "text")
+            self.base_minimum_button.clicked.connect(self.open_base_minimum)
+            main.addWidget(self.base_minimum_button, 2, 2, Qt.AlignmentFlag.AlignLeft)
+        body.addLayout(main)
+
+        by_source = analysis.expenses_by_source
+        self.breakdown = text_label(
+            "Фактичні витрати за джерелом: з доходів "
+            f"{format_money(by_source[SourceKind.INCOME])} · із загального нерозподіленого "
+            f"залишку {format_money(by_source[SourceKind.GENERAL_REMAINDER])} · з накопичень "
+            f"{format_money(by_source[SourceKind.ACCUMULATION])}",
+            "secondary",
+            muted=True,
+        )
+        body.addWidget(self.breakdown)
+        # Порівняння — нейтральний текст, без «Обмеження», кольору чи смуги (ADR 0020).
+        self.comparison_label = text_label(
+            comparison_text(analysis.comparison) if analysis.comparison else "",
+            "secondary",
+            muted=True,
+        )
+        self.comparison_label.setVisible(analysis.comparison is not None)
+        body.addWidget(self.comparison_label)
+
+        second = QGridLayout()
+        second.setHorizontalSpacing(SPACING[6])
+        for column, (title, amount) in enumerate(
+            (
+                ("Поповнення накопичень", analysis.replenishments),
+                ("Погашення боргів", analysis.debt_repayments),
+                ("Отримані позикові кошти", analysis.loan_receipts),
+            )
+        ):
+            second.addWidget(text_label(title, "caption", muted=True), 0, column)
+            self.summary_amounts[title] = amount_label(amount)
+            second.addWidget(self.summary_amounts[title], 1, column)
+        body.addLayout(second)
+
+    def _fill_movements(self, analysis: MonthAnalysis) -> None:
+        """Рух накопичень: надходження, обидва види відтоку й чиста зміна (варіант А)."""
+        clear_layout(self.movement_rows)
+        if not analysis.accumulation_movements:
+            self.movement_rows.addWidget(
+                text_label("У цьому місяці накопичення не змінювалися.", "body", muted=True)
+            )
+        for movement in analysis.accumulation_movements:
+            self.movement_rows.addWidget(
+                ListRow(
+                    movement.name,
+                    movement_secondary(movement),
+                    movement.net_change,
+                    archived=movement.archived,
+                )
+            )
+
+    def open_base_minimum(self) -> None:
+        dialog = BaseMinimumDialog(self._services.base_minimums, self.month, parent=self)
+        if dialog.exec():
+            self._after_change()
 
     def _row_actions(self, view: ExpenseView) -> QPushButton:
         more = button("⋯", "text")
