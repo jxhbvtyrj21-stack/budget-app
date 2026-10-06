@@ -11,16 +11,26 @@
 """
 
 import sqlite3
+from dataclasses import dataclass
 
 from budget.domain.calendar import CalendarMonth, Clock, current_month
-from budget.domain.models import Debt, DebtOrigin, DebtStatus, optional_description, require_name
+from budget.domain.models import (
+    Debt,
+    DebtOrigin,
+    DebtRepayment,
+    DebtStatus,
+    SourceKind,
+    SourceRef,
+    optional_description,
+    require_name,
+)
 from budget.domain.money import Money, require_positive
 from budget.errors import DomainRuleError
 from budget.services.balances import BalanceService, DebtView
-from budget.services.expense import HISTORICAL_READ_ONLY
+from budget.services.expense import HISTORICAL_READ_ONLY, SourceOption
 from budget.services.setup import require_normal_operation
-from budget.services.sources import SourceLedger
-from budget.storage.repositories import DebtRepository
+from budget.services.sources import GENERAL_REMAINDER_NAME, SourceLedger
+from budget.storage.repositories import AccumulationRepository, DebtRepository, IncomeRepository
 from budget.storage.transaction import transaction
 
 INITIAL_DEBT_FIXED = (
@@ -50,6 +60,23 @@ class DebtReopenError(DomainRuleError):
         )
 
 
+class DebtOverpaymentError(DomainRuleError):
+    """Погашення більше за залишок боргу (ADR 0018, п. 3). Суми форматує інтерфейс."""
+
+    def __init__(self, name: str, remaining: Money, required: Money) -> None:
+        self.name = name
+        self.remaining = remaining
+        self.required = required
+        super().__init__(f"Погашення перевищує залишок боргу «{name}».")
+
+
+@dataclass(frozen=True, slots=True)
+class RepaymentView:
+    repayment: DebtRepayment
+    debt_name: str
+    source_name: str
+
+
 class DebtService:
     def __init__(self, connection: sqlite3.Connection, clock: Clock) -> None:
         self._connection = connection
@@ -57,6 +84,8 @@ class DebtService:
         self._debts = DebtRepository(connection)
         self._balances = BalanceService(connection)
         self._ledger = SourceLedger(connection, clock)
+        self._incomes = IncomeRepository(connection)
+        self._accumulations = AccumulationRepository(connection)
 
     # Читання ---------------------------------------------------------------------------
 
@@ -141,7 +170,181 @@ class DebtService:
             self._debts.update_metadata(debt_id, cleaned_name, cleaned_description)
         return self.get(debt_id)
 
+    # Погашення ---------------------------------------------------------------------------
+
+    def get_repayment(self, repayment_id: int) -> RepaymentView:
+        return self._repayment_view(self._require_repayment(repayment_id))
+
+    def repayments_for_month(self, month: CalendarMonth) -> list[RepaymentView]:
+        return [self._repayment_view(r) for r in self._debts.list_repayments_for_month(month)]
+
+    def history(self, debt_id: int) -> list[RepaymentView]:
+        """Погашення боргу від нових до старих (для картки боргу)."""
+        self._require(debt_id)
+        return [self._repayment_view(r) for r in self._debts.list_repayments_for_debt(debt_id)]
+
+    def source_options(self, editing: DebtRepayment | None = None) -> list[SourceOption]:
+        """Джерела погашення: активні доходи поточного місяця, загальний нерозподілений
+        залишок, неархівовані накопичення (ADR 0018, п. 3). Борг джерелом не буває.
+
+        Під час зміни погашення його сума рахується доступною в тому самому джерелі.
+        Залишки — з ``BalanceService``; достатність перевіряє ``SourceLedger``.
+        """
+        month = current_month(self._clock)
+        options = []
+        for income in reversed(self._incomes.list_for_month(month)):
+            balance = self._balances.income_balance(income)
+            if not income.archived and balance.is_positive:
+                source = SourceRef(SourceKind.INCOME, income_id=income.id)
+                options.append(SourceOption(source, income.name, balance))
+        options.append(
+            SourceOption(
+                SourceRef(SourceKind.GENERAL_REMAINDER),
+                GENERAL_REMAINDER_NAME,
+                self._balances.general_remainder(),
+            )
+        )
+        for accumulation in self._accumulations.list_by_archived(False):
+            source = SourceRef(SourceKind.ACCUMULATION, accumulation_id=accumulation.id)
+            balance = self._balances.accumulation_balance(accumulation)
+            options.append(SourceOption(source, accumulation.name, balance))
+        if editing is None:
+            return options
+        return [
+            SourceOption(o.source, o.name, o.available + editing.amount)
+            if o.source == editing.source
+            else o
+            for o in options
+        ]
+
+    def repayment_lock_reason(self, repayment: DebtRepayment) -> str | None:
+        """Чому суму й джерело погашення змінити чи видалити не можна; ``None`` — можна.
+
+        Минулий місяць — лише перегляд; архівований дохід не відновлюється (Q168);
+        погашення з архівованого накопичення фінансово не змінюється (Q189, Q191 —
+        опис змінювати можна). Для погашеного боргу додатково діє
+        ``repayment_delete_block_reason``: зменшувати й видаляти не можна, а змінити
+        джерело за тієї самої суми можна.
+        """
+        if repayment.month != current_month(self._clock):
+            return HISTORICAL_READ_ONLY
+        try:
+            self._ledger.require_financially_changeable(repayment.source)
+        except DomainRuleError as error:
+            return error.user_message
+        return None
+
+    def repayment_delete_block_reason(self, repayment: DebtRepayment) -> str | None:
+        """Чому погашення не можна видалити: загальні блокування або погашений борг,
+        який видалення відкрило б повторно."""
+        reason = self.repayment_lock_reason(repayment)
+        if reason is not None:
+            return reason
+        debt = self._balances.debt_view(self._require(repayment.debt_id))
+        if debt.remaining.is_zero:
+            return DebtReopenError(debt.debt.name).user_message
+        return None
+
+    def repay(
+        self, debt_id: int, amount: Money, source: SourceRef, description: str | None = None
+    ) -> RepaymentView:
+        """Погашення поточного місяця з одного вручну обраного джерела (ADR 0018, п. 3)."""
+        require_normal_operation(self._connection)
+        with transaction(self._connection):
+            view = self._balances.debt_view(self._require(debt_id))
+            repayment = DebtRepayment(
+                None, debt_id, current_month(self._clock), description, amount, source
+            )
+            if amount > view.remaining:
+                raise DebtOverpaymentError(view.debt.name, view.remaining, amount)
+            self._ledger.require_available(source, amount)
+            repayment_id = self._debts.insert_repayment(repayment)
+            self._draw(repayment)
+        return self.get_repayment(repayment_id)
+
+    def update_repayment(
+        self,
+        repayment_id: int,
+        amount: Money,
+        source: SourceRef,
+        description: str | None,
+    ) -> RepaymentView:
+        """Змінює суму, джерело чи опис погашення поточного місяця однією транзакцією.
+
+        Зміна лише опису фінансового стану не змінює (Q191). Зміна суми чи джерела
+        перевіряється до запису: залишок джерела (з урахуванням суми, яку погашення
+        вже бере з того самого джерела), залишок боргу, Q168, Q189 і правило
+        «погашений борг не відкривається повторно».
+        """
+        require_normal_operation(self._connection)
+        with transaction(self._connection):
+            old = self._current_month_repayment(repayment_id)
+            new = DebtRepayment(old.id, old.debt_id, old.month, description, amount, source)
+            if new.amount == old.amount and new.source == old.source:
+                self._debts.update_repayment_description(old.id, new.description)
+            else:
+                self._ledger.require_financially_changeable(old.source)
+                view = self._balances.debt_view(self._require(old.debt_id))
+                if view.remaining.is_zero and new.amount < old.amount:
+                    raise DebtReopenError(view.debt.name)
+                if new.amount > view.remaining + old.amount:
+                    raise DebtOverpaymentError(
+                        view.debt.name, view.remaining + old.amount, new.amount
+                    )
+                released = old.amount if new.source == old.source else None
+                self._ledger.require_available(new.source, new.amount, released=released)
+                self._release(old)
+                self._debts.replace_repayment(new)
+                self._draw(new)
+        return self.get_repayment(repayment_id)
+
+    def delete_repayment(self, repayment_id: int) -> None:
+        """Видаляє погашення поточного місяця й повертає кошти джерелу (ADR 0018, п. 5)."""
+        require_normal_operation(self._connection)
+        with transaction(self._connection):
+            old = self._current_month_repayment(repayment_id)
+            self._ledger.require_financially_changeable(old.source)
+            view = self._balances.debt_view(self._require(old.debt_id))
+            if view.remaining.is_zero:
+                raise DebtReopenError(view.debt.name)
+            self._release(old)
+            self._debts.delete_repayment(old.id)
+
     # Допоміжне -------------------------------------------------------------------------
+
+    def _require_repayment(self, repayment_id: int) -> DebtRepayment:
+        repayment = self._debts.get_repayment(repayment_id)
+        if repayment is None:
+            raise DomainRuleError("Погашення не знайдено.")
+        return repayment
+
+    def _current_month_repayment(self, repayment_id: int) -> DebtRepayment:
+        repayment = self._require_repayment(repayment_id)
+        if repayment.month != current_month(self._clock):
+            raise DomainRuleError(HISTORICAL_READ_ONLY)
+        return repayment
+
+    def _draw(self, repayment: DebtRepayment) -> None:
+        """Застосовує записане погашення до джерела: нерозподілений залишок зменшується,
+        дохід із нульовим залишком архівується (ADR 0009). Залишки доходу й накопичення
+        зменшуються через сам запис погашення (їх рахує ``BalanceService``)."""
+        if repayment.source.kind is SourceKind.GENERAL_REMAINDER:
+            self._ledger.debit_general_remainder(repayment.amount)
+        elif repayment.source.kind is SourceKind.INCOME:
+            self._ledger.settle_income(repayment.source.income_id)
+
+    def _release(self, repayment: DebtRepayment) -> None:
+        """Повертає списання погашення з нерозподіленого залишку перед заміною чи видаленням."""
+        if repayment.source.kind is SourceKind.GENERAL_REMAINDER:
+            self._ledger.credit_general_remainder(repayment.amount)
+
+    def _repayment_view(self, repayment: DebtRepayment) -> RepaymentView:
+        debt = self._debts.get(repayment.debt_id)
+        return RepaymentView(
+            repayment,
+            debt.name if debt else "Борг",
+            self._ledger.source_name(repayment.source),
+        )
 
     def _require(self, debt_id: int) -> Debt:
         debt = self._debts.get(debt_id)
