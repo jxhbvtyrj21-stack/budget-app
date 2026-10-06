@@ -77,6 +77,22 @@ QPushButton[variant="danger-text"] {{
     border-radius: {RADII["sm"]}px;
 }}
 #ListRow {{ border-bottom: 1px solid {r["divider"]}; }}
+QPushButton[segment="true"]:checked {{
+    background: {r["primary-soft"]}; color: {r["primary"]}; border-color: {r["primary"]};
+}}
+#StatusBadge {{
+    border-radius: {RADII["sm"]}px; padding: 0 {SPACING[2]}px; font-weight: 600;
+}}
+#StatusBadge[badge="active"] {{ border: 1px solid {r["border-control"]}; color: {r["text"]}; }}
+#StatusBadge[badge="reached"] {{ background: {r["primary-soft"]}; color: {r["primary"]}; }}
+#StatusBadge[badge="closed"] {{
+    background: {r["neutral-fill"]}; color: {r["on-neutral-fill"]};
+}}
+#ArchiveMarker {{ color: {r["text-muted"]}; font-weight: 600; }}
+#TargetProgress {{
+    background: {r["surface-sunken"]}; border: none; border-radius: {RADII["sm"]}px;
+}}
+#TargetProgress::chunk {{ background: {r["primary"]}; border-radius: {RADII["sm"]}px; }}
 #InfoBanner {{ background: {r["surface-sunken"]}; border-radius: {RADII["sm"]}px; }}
 QDialog {{ background: {r["surface"]}; }}
 """,
