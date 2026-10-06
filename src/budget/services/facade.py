@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from budget.domain.calendar import Clock
 from budget.services.accumulation import AccumulationService
 from budget.services.balances import BalanceService
+from budget.services.base_minimum import BaseMinimumService
 from budget.services.debt import DebtService
 from budget.services.expense import ExpenseService
 from budget.services.income import IncomeService
 from budget.services.month import MonthService, MonthTransitionService
+from budget.services.month_analysis import MonthAnalysisService
 from budget.services.replenishment import ReplenishmentService
 from budget.services.setup import InitialSetupService
 
@@ -22,6 +24,8 @@ class AppServices:
     accumulations: AccumulationService
     replenishments: ReplenishmentService
     debts: DebtService
+    base_minimums: BaseMinimumService
+    analysis: MonthAnalysisService
     balances: BalanceService
     months: MonthService
     transitions: MonthTransitionService
@@ -35,6 +39,8 @@ class AppServices:
             accumulations=AccumulationService(connection, clock),
             replenishments=ReplenishmentService(connection, clock),
             debts=DebtService(connection, clock),
+            base_minimums=BaseMinimumService(connection, clock),
+            analysis=MonthAnalysisService(connection),
             balances=BalanceService(connection),
             months=MonthService(clock),
             transitions=MonthTransitionService(connection, clock),
