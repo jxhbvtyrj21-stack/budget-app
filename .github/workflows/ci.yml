@@ -38,9 +38,10 @@ jobs:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
       - run: uv sync --locked
-      # domain, storage, services і архітектурні обмеження — без Qt.
+      # domain, storage, services і архітектурні обмеження — без Qt. Плагін pytest-qt
+      # вимкнено: він імпортує QtGui, а на ubuntu-runner немає бібліотек OpenGL/EGL.
       - run: >-
-          uv run pytest tests/domain tests/storage tests/services
+          uv run pytest -p no:pytest-qt tests/domain tests/storage tests/services
           tests/test_architecture.py tests/test_product_identity.py
 
   windows-tests:
