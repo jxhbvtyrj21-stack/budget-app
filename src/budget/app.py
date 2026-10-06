@@ -119,10 +119,14 @@ def build_main_window(
     connection: sqlite3.Connection,
     clock: Clock,
     backups_dir: Path | None = None,
+    *,
+    month_transition: bool = True,
 ):
     """Створює головне вікно з темою; фінансові екрани — лише після налаштування.
 
-    Перед побудовою виконується перехід між місяцями для доходів (ADR 0009).
+    Під час звичайного запуску перед побудовою виконується перехід між місяцями
+    для доходів (ADR 0009). Після відновлення з копії (``month_transition=False``)
+    переходу немає: відкривається саме стан, що міститься в копії.
     """
 
     from budget.services.facade import AppServices
@@ -130,8 +134,30 @@ def build_main_window(
 
     apply_theme()
     services = AppServices.create(connection, clock, backups_dir)
-    services.transitions.run_on_startup()
+    if month_transition:
+        services.transitions.run_on_startup()
     return MainWindow(identity.name, services)
+
+
+def show_main_window(
+    identity: ProductIdentity,
+    connection: sqlite3.Connection,
+    clock: Clock,
+    backups_dir: Path,
+    *,
+    restored: bool,
+):
+    """Показує головне вікно. Після відновлення — без переходу між місяцями й без
+    автоматичного діалогу тривалої перерви: жодної фінансової зміни лише тому, що
+    з часу копії настав інший календарний момент."""
+    window = build_main_window(
+        identity, connection, clock, backups_dir, month_transition=not restored
+    )
+    window.show()
+    if not restored:
+        # Спеціальний діалог після тривалої перерви: один, без автоматичного вибору.
+        window.open_long_gap_dialog()
+    return window
 
 
 def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
@@ -149,6 +175,7 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
     if lock is None:
         _show_message(identity.name, "Застосунок уже запущено.")
         return EXIT_ALREADY_RUNNING
+    restored = False
     try:
         connection = open_application_database(paths, clock)
     except DatabaseCorruptedError as exc:
@@ -156,15 +183,16 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
         connection = _recover_corrupted_database(identity, paths, clock, exc)
         if connection is None:
             return EXIT_DATA_CORRUPTED
+        restored = True
     except BudgetError as exc:
         log.exception("Startup failed")
         _show_message(identity.name, exc.user_message)
         return EXIT_STARTUP_FAILED
-    window = build_main_window(identity, connection, clock, paths.backups)
-    window.show()
-    # Спеціальний діалог після тривалої перерви: один, без автоматичного вибору.
-    window.open_long_gap_dialog()
     try:
+        # Посилання тримає вікно живим до кінця циклу подій.
+        window = show_main_window(  # noqa: F841
+            identity, connection, clock, paths.backups, restored=restored
+        )
         return application.exec()
     finally:
         connection.close()
