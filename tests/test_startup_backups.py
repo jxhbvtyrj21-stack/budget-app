@@ -137,3 +137,37 @@ def test_backups_stay_in_data_directory(paths, clock):
     assert {p.parent for p in paths.backups.iterdir()} == {paths.backups}
     # Копії — окремі файли бази без супутніх -wal/-shm.
     assert not [p for p in paths.backups.iterdir() if p.suffix != ".db"]
+
+
+def test_backups_directory_under_local_app_data(monkeypatch, tmp_path):
+    """Windows: ``%LOCALAPPDATA%\\Budget\\backups`` (шлях із пробілами)."""
+    from budget.platform.identity import load_product_identity
+    from budget.platform.paths import DATA_DIR_OVERRIDE_ENV, data_paths
+
+    identity = load_product_identity()
+    local = tmp_path / "Users" / "Ім'я Прізвище" / "AppData" / "Local"
+    monkeypatch.delenv(DATA_DIR_OVERRIDE_ENV, raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("XDG_DATA_HOME", str(local))
+    paths = data_paths(identity)
+    assert paths.backups == local / identity.data_directory_name / "backups"
+    assert identity.data_directory_name == "Budget"
+
+
+def test_backup_while_another_connection_holds_write_lock(paths, clock):
+    """WAL: незавершений запис іншого з'єднання не блокує копію й не потрапляє в неї."""
+    start(paths, clock)
+    other = sqlite3.connect(paths.database, isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")
+    other.execute("CREATE TABLE uncommitted (id INTEGER PRIMARY KEY)")
+    try:
+        clock.set(START + timedelta(days=1))
+        start(paths, clock)
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
+    daily = paths.backups / "budget-20261007-120000-daily.db"
+    copy = sqlite3.connect(daily)
+    tables = {r[0] for r in copy.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    copy.close()
+    assert "uncommitted" not in tables
