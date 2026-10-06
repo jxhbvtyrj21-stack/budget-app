@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from budget.domain.calendar import Clock
 from budget.services.accumulation import AccumulationService
 from budget.services.balances import BalanceService
+from budget.services.debt import DebtService
 from budget.services.expense import ExpenseService
 from budget.services.income import IncomeService
 from budget.services.month import MonthService, MonthTransitionService
@@ -20,6 +21,7 @@ class AppServices:
     expenses: ExpenseService
     accumulations: AccumulationService
     replenishments: ReplenishmentService
+    debts: DebtService
     balances: BalanceService
     months: MonthService
     transitions: MonthTransitionService
@@ -32,6 +34,7 @@ class AppServices:
             expenses=ExpenseService(connection, clock),
             accumulations=AccumulationService(connection, clock),
             replenishments=ReplenishmentService(connection, clock),
+            debts=DebtService(connection, clock),
             balances=BalanceService(connection),
             months=MonthService(clock),
             transitions=MonthTransitionService(connection, clock),
