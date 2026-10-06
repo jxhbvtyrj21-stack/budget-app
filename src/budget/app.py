@@ -73,6 +73,51 @@ def open_application_database(paths: DataPaths, clock: Clock) -> sqlite3.Connect
     return connection
 
 
+class ApplicationSession:
+    """Єдиний власник з'єднання з робочою базою на час роботи застосунку.
+
+    Не singleton і не глобальний стан: створюється в ``_run_gui``. Сервіси й
+    інтерфейс отримують той самий об'єкт з'єднання через ``AppServices`` і ніколи
+    не відкривають і не закривають його самі. SQL і бізнес-логіки тут немає.
+    """
+
+    def __init__(self, paths: DataPaths, clock: Clock) -> None:
+        self._paths = paths
+        self._clock = clock
+        self._connection: sqlite3.Connection | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self._connection is not None
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise RuntimeError("Немає відкритої бази в сесії")
+        return self._connection
+
+    def open(self) -> sqlite3.Connection:
+        """Відкриває базу звичайним шляхом запуску (``open_application_database``)."""
+        self._require_closed()
+        self._connection = open_application_database(self._paths, self._clock)
+        return self._connection
+
+    def adopt(self, connection: sqlite3.Connection) -> None:
+        """Бере у власність уже відкриту базу (після відновлення під час запуску)."""
+        self._require_closed()
+        self._connection = connection
+
+    def close(self) -> None:
+        """Закриває поточне з'єднання; повторний виклик нічого не робить."""
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            connection.close()
+
+    def _require_closed(self) -> None:
+        if self._connection is not None:
+            raise RuntimeError("Сесія вже має відкриту базу; спершу закрийте її")
+
+
 def restore_and_open(paths: DataPaths, clock: Clock, backup_path: Path) -> sqlite3.Connection:
     """Відновлює базу з копії й відкриває її звичайним шляхом запуску (DS-6).
 
@@ -189,28 +234,44 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
     if lock is None:
         _show_message(identity.name, "Застосунок уже запущено.")
         return EXIT_ALREADY_RUNNING
-    restored = False
+    session = ApplicationSession(paths, clock)
+    exit_code, restored = start_session(identity, session, paths, clock)
+    if exit_code is not None:
+        return exit_code
     try:
-        connection = open_application_database(paths, clock)
+        # Посилання тримає вікно живим до кінця циклу подій.
+        window = show_main_window(  # noqa: F841
+            identity, session.connection, clock, paths.backups, restored=restored
+        )
+        return application.exec()
+    finally:
+        session.close()
+        lock.unlock()
+
+
+def start_session(
+    identity: ProductIdentity, session: ApplicationSession, paths: DataPaths, clock: Clock
+) -> tuple[int | None, bool]:
+    """Відкриває базу сесії під час запуску.
+
+    Повертає ``(код виходу, відновлено)``: код виходу — якщо продовжити неможливо,
+    інакше ``None``; ``відновлено`` — базу відновлено з копії (DS-6). Відкритою
+    лишається лише база, якою володіє ``session``.
+    """
+    try:
+        session.open()
     except DatabaseCorruptedError as exc:
         log.exception("Database corrupted")
         connection = _recover_corrupted_database(identity, paths, clock, exc)
         if connection is None:
-            return EXIT_DATA_CORRUPTED
-        restored = True
+            return EXIT_DATA_CORRUPTED, False
+        session.adopt(connection)
+        return None, True
     except BudgetError as exc:
         log.exception("Startup failed")
         _show_message(identity.name, exc.user_message)
-        return EXIT_STARTUP_FAILED
-    try:
-        # Посилання тримає вікно живим до кінця циклу подій.
-        window = show_main_window(  # noqa: F841
-            identity, connection, clock, paths.backups, restored=restored
-        )
-        return application.exec()
-    finally:
-        connection.close()
-        lock.unlock()
+        return EXIT_STARTUP_FAILED, False
+    return None, False
 
 
 def _recover_corrupted_database(
