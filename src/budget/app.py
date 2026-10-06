@@ -13,7 +13,7 @@ from budget.errors import BudgetError, DatabaseCorruptedError, StartupError
 from budget.platform.identity import ProductIdentity, load_product_identity
 from budget.platform.paths import DataPaths, data_paths
 from budget.platform.resources import assets_dir
-from budget.services.backup import RecoveryService
+from budget.services.backup import BackupService, RecoveryService
 from budget.services.startup import prepare_database
 from budget.storage.integrity import quick_check
 
@@ -59,7 +59,18 @@ def self_check() -> int:
 
 
 def open_application_database(paths: DataPaths, clock: Clock) -> sqlite3.Connection:
-    return prepare_database(paths.database, paths.backups, clock)
+    """Відкриває й готує базу, потім створює автоматичні копії поточного періоду (DS-5).
+
+    Пошкодження, виявлене повним ``integrity_check`` перед копією, — ``DatabaseCorruptedError``:
+    з'єднання закривається без жодного запису, далі — наявний карантин (DS-6).
+    """
+    connection = prepare_database(paths.database, paths.backups, clock)
+    try:
+        BackupService(connection, paths.backups, clock).run_automatic()
+    except BaseException:
+        connection.close()
+        raise
+    return connection
 
 
 def build_main_window(identity: ProductIdentity, connection: sqlite3.Connection, clock: Clock):

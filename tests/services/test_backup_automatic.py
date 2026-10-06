@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from budget.domain.calendar import FixedClock
-from budget.errors import DatabaseCorruptedError, StorageError
+from budget.errors import DatabaseCorruptedError
 from budget.services.backup import BackupKind, BackupService, parse_backup_name
 from budget.services.startup import prepare_database
 from budget.storage import backup as backup_module
@@ -92,13 +92,13 @@ def test_invalid_generated_backup_is_removed_and_pool_untouched(setup, clock, mo
         service.run_automatic()
     before = kinds(backups_dir, BackupKind.DAILY)
     assert len(before) == 7
-    calls = iter([True, False])  # вихідна база справна, нова копія — ні
-    monkeypatch.setattr(backup_module, "integrity_check", lambda connection: next(calls))
+    calls = iter([True, False])  # вихідна база справна, нова щоденна копія — ні
+    monkeypatch.setattr(backup_module, "integrity_check", lambda c: next(calls, True))
     at(clock, days=7)
-    with pytest.raises(StorageError):
-        service.run_automatic()
+    created = service.run_automatic()  # помилка записана в журнал, запуск не зупинено
     # Невдалу копію видалено, а ротація не відбулася: старі копії на місці.
     assert kinds(backups_dir, BackupKind.DAILY) == before
+    assert created == []  # щотижнева й щомісячна за цей період уже є
 
 
 def test_daily_rotation_keeps_seven(setup, clock):

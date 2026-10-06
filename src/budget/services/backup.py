@@ -15,6 +15,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from budget.domain.calendar import CalendarMonth, Clock
+from budget.errors import DatabaseCorruptedError, StorageError
 from budget.storage.backup import backup_database
 from budget.storage.recovery import quarantine_database, restore_from_backup
 
@@ -134,11 +135,19 @@ class BackupService:
 
         Для кожного пулу: якщо копії цього виду за поточний календарний період немає —
         створити й перевірити нову, і лише після цього застосувати ротацію саме цього
-        пулу. Помилка створення пробрасується, а наявні копії лишаються незмінними.
+        пулу. Звичайна помилка копіювання (напр., бракує місця на диску) записується в
+        журнал і не зупиняє запуск: ротація цього пулу не виконується, наявні копії
+        лишаються. Пошкодження вихідної бази (``DatabaseCorruptedError``) пробрасується.
         """
         created = []
         for policy in AUTOMATIC_POLICIES:
-            path = self._ensure_period_backup(policy)
+            try:
+                path = self._ensure_period_backup(policy)
+            except DatabaseCorruptedError:
+                raise
+            except StorageError:
+                log.exception("Автоматична копія «%s» не створена", policy.kind.value)
+                continue
             if path is not None:
                 created.append(path)
         return created
