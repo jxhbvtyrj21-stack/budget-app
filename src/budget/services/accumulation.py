@@ -1,4 +1,6 @@
-"""Накопичення як сутність: створення й ручний життєвий цикл (ADR 0007, ADR 0011–0013).
+"""Накопичення як сутність: створення, життєвий цикл, архів і метадані.
+
+ADR 0007, ADR 0011–0014, ADR 0022.
 
 Залишок накопичення не зберігається окремо: його рахує лише ``BalanceService``
 (початковий баланс + поповнення − витрати − погашення). Статус змінює тільки
@@ -7,7 +9,7 @@
 """
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from budget.domain.calendar import Clock
 from budget.domain.models import (
@@ -20,12 +22,20 @@ from budget.domain.models import (
 from budget.domain.money import Money
 from budget.errors import DomainRuleError
 from budget.services.balances import BalanceService
+from budget.services.expense import ExpenseView
 from budget.services.setup import require_normal_operation
-from budget.storage.repositories import AccumulationRepository
+from budget.storage.repositories import AccumulationRepository, ExpenseRepository
 from budget.storage.transaction import transaction
 
 STATUS_LOCKED_IN_ARCHIVE = (
     "Накопичення в архіві: статус не змінюється. Щоб змінити статус, розархівуйте накопичення."
+)
+
+
+ARCHIVE_ONLY_CLOSED = "Архівувати можна лише закрите накопичення."
+ARCHIVED_NOTICE = (
+    "Накопичення в архіві. Нові поповнення й витрати недоступні, статус не змінюється, "
+    "суми операцій поточного місяця не редагуються. Щоб змінити їх, розархівуйте накопичення."
 )
 
 
@@ -57,6 +67,7 @@ class AccumulationService:
         self._clock = clock
         self._accumulations = AccumulationRepository(connection)
         self._balances = BalanceService(connection)
+        self._expenses = ExpenseRepository(connection)
 
     # Читання ---------------------------------------------------------------------------
 
@@ -69,6 +80,15 @@ class AccumulationService:
 
     def list_archived(self) -> list[AccumulationView]:
         return [self._view(a) for a in self._accumulations.list_by_archived(True)]
+
+    def expense_history(self, accumulation_id: int) -> list[ExpenseView]:
+        """Звичайні витрати з цього накопичення, від нових до старих (Q170).
+
+        Початковий баланс — не операція й не має місяця; інтерфейс показує його
+        окремим рядком із ``accumulation.initial_balance``.
+        """
+        name = self._require(accumulation_id).name
+        return [ExpenseView(e, name) for e in self._expenses.list_for_accumulation(accumulation_id)]
 
     def status_transitions(self, view: AccumulationView) -> tuple[AccumulationStatus, ...]:
         """Переходи, дозволені графом ADR 0007; в архіві статус не змінюється (Q188).
@@ -114,6 +134,50 @@ class AccumulationService:
                 if blocker is not None:
                     raise blocker
             self._accumulations.set_status(accumulation_id, status)
+        return self.get(accumulation_id)
+
+    def update_metadata(
+        self,
+        accumulation_id: int,
+        name: str,
+        description: str | None,
+        target: Money | None,
+    ) -> AccumulationView:
+        """Назва, опис і цільова сума — метадані (Q184, ADR 0022).
+
+        Дозволено в будь-якому статусі й в архіві. Не змінює залишку, статусу,
+        архівності й не створює фінансових записів; історія змін не ведеться.
+        """
+        require_normal_operation(self._connection)
+        with transaction(self._connection):
+            current = self._require(accumulation_id)
+            # Перевірка через доменну сутність: порожня назва, від'ємна ціль.
+            updated = replace(current, name=name, description=description, target=target)
+            self._accumulations.update_metadata(
+                accumulation_id, updated.name, updated.description, updated.target
+            )
+        return self.get(accumulation_id)
+
+    def archive(self, accumulation_id: int) -> AccumulationView:
+        """«Закрите» → «Закрите + архівоване» (Q186); залишок не змінюється (Q187)."""
+        require_normal_operation(self._connection)
+        with transaction(self._connection):
+            accumulation = self._require(accumulation_id)
+            if accumulation.archived:
+                raise DomainRuleError("Накопичення вже в архіві.")
+            if accumulation.status is not AccumulationStatus.CLOSED:
+                raise DomainRuleError(ARCHIVE_ONLY_CLOSED)
+            self._accumulations.set_archived(accumulation_id, True)
+        return self.get(accumulation_id)
+
+    def unarchive(self, accumulation_id: int) -> AccumulationView:
+        """«Закрите + архівоване» → «Закрите» (Q181, Q186): статус лишається «Закрите»."""
+        require_normal_operation(self._connection)
+        with transaction(self._connection):
+            accumulation = self._require(accumulation_id)
+            if not accumulation.archived:
+                raise DomainRuleError("Накопичення не в архіві.")
+            self._accumulations.set_archived(accumulation_id, False)
         return self.get(accumulation_id)
 
     # Допоміжне -------------------------------------------------------------------------
