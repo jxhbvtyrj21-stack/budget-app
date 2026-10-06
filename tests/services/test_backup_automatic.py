@@ -110,3 +110,44 @@ def test_daily_rotation_keeps_seven(setup, clock):
     assert len(daily) == 7
     assert "budget-20261006-120000-daily.db" not in daily  # найстаріша видалена
     assert daily[-1] == "budget-20261013-120000-daily.db"
+
+
+# Щотижневі --------------------------------------------------------------------------------
+
+
+def test_first_launch_of_week_creates_separate_weekly(setup):
+    service, backups_dir = setup
+    service.run_automatic()
+    assert kinds(backups_dir, BackupKind.WEEKLY) == ["budget-20261006-120000-weekly.db"]
+    # Окремий файл, а не позначка щоденної копії.
+    assert kinds(backups_dir, BackupKind.DAILY) == ["budget-20261006-120000-daily.db"]
+
+
+def test_repeated_launch_same_week_no_duplicate(setup, clock):
+    service, backups_dir = setup
+    service.run_automatic()  # вівторок
+    at(clock, days=5, hours=11)  # неділя 11 жовтня, 23:00 — той самий тиждень ISO
+    service.run_automatic()
+    assert len(kinds(backups_dir, BackupKind.WEEKLY)) == 1
+    assert len(kinds(backups_dir, BackupKind.DAILY)) == 2
+
+
+def test_calendar_week_not_rolling_seven_days(setup, clock):
+    service, backups_dir = setup
+    service.run_automatic()  # вівторок, 6 жовтня
+    at(clock, days=5, hours=13)  # понеділок 12 жовтня, 01:00 — новий тиждень ISO
+    service.run_automatic()
+    assert kinds(backups_dir, BackupKind.WEEKLY) == [
+        "budget-20261006-120000-weekly.db",
+        "budget-20261012-010000-weekly.db",
+    ]
+
+
+def test_weekly_rotation_keeps_four_and_spares_other_pools(setup, clock):
+    service, backups_dir = setup
+    for week in range(5):
+        at(clock, weeks=week)
+        service.run_automatic()
+    weekly = kinds(backups_dir, BackupKind.WEEKLY)
+    assert len(weekly) == 4 and "budget-20261006-120000-weekly.db" not in weekly
+    assert len(kinds(backups_dir, BackupKind.DAILY)) == 5  # щоденні не зачеплено

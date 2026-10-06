@@ -90,8 +90,15 @@ def calendar_day(moment: datetime) -> Hashable:
     return moment.date()
 
 
+def calendar_week(moment: datetime) -> Hashable:
+    """Календарний тиждень ISO 8601 (з понеділка) за київським часом, не ковзні 7 днів."""
+    year, week, _ = moment.isocalendar()
+    return year, week
+
+
 DAILY = RotationPolicy(BackupKind.DAILY, 7, calendar_day)
-AUTOMATIC_POLICIES: tuple[RotationPolicy, ...] = (DAILY,)
+WEEKLY = RotationPolicy(BackupKind.WEEKLY, 4, calendar_week)
+AUTOMATIC_POLICIES: tuple[RotationPolicy, ...] = (DAILY, WEEKLY)
 
 
 class BackupService:
