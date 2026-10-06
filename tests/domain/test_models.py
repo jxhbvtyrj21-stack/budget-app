@@ -9,10 +9,12 @@ from budget.domain.models import (
     DebtOrigin,
     Expense,
     Income,
+    MinimumComparison,
     Replenishment,
     ReplenishmentPart,
     SourceKind,
     SourceRef,
+    compare_with_base_minimum,
     debt_status,
     income_status,
     target_progress,
@@ -99,3 +101,21 @@ def test_replenishment_totals_by_source_aggregate_duplicates():
     assert replenishment.totals_by_source() == {income: Money(125), remainder: Money(50)}
     assert list(replenishment.totals_by_source()) == [income, remainder]
     assert replenishment.total == Money(175)
+
+
+@pytest.mark.parametrize(
+    ("actual", "minimum", "outcome", "difference"),
+    [
+        (3_200_050, 3_000_000, MinimumComparison.GREATER, 200_050),
+        (2_999_999, 3_000_000, MinimumComparison.LESS, 1),
+        (3_000_000, 3_000_000, MinimumComparison.EQUAL, 0),
+        (150, 0, MinimumComparison.GREATER, 150),
+        (0, 0, MinimumComparison.EQUAL, 0),
+        (0, 100_000, MinimumComparison.LESS, 100_000),
+    ],
+)
+def test_compare_with_base_minimum(actual, minimum, outcome, difference):
+    result = compare_with_base_minimum(Money(actual), Money(minimum))
+    assert result.outcome is outcome
+    assert result.difference == Money(difference)
+    assert type(result.difference.kopiyky) is int

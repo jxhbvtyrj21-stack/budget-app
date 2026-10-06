@@ -280,6 +280,32 @@ class BaseMinimum:
         require_non_negative(self.amount)
 
 
+class MinimumComparison(StrEnum):
+    """Фактичні витрати проти базового мінімуму — лише інформаційно (ADR 0020)."""
+
+    GREATER = "greater"
+    LESS = "less"
+    EQUAL = "equal"
+
+
+@dataclass(frozen=True, slots=True)
+class BaseMinimumComparison:
+    outcome: MinimumComparison
+    difference: Money  # завжди невід'ємна; для EQUAL — 0
+
+
+def compare_with_base_minimum(actual: Money, base_minimum: Money) -> BaseMinimumComparison:
+    """Порівнює фактичні витрати з базовим мінімумом у копійках, без ``float``.
+
+    Перевищення не є боргом і нічого не блокує (ADR 0002, п. 4).
+    """
+    if actual > base_minimum:
+        return BaseMinimumComparison(MinimumComparison.GREATER, actual - base_minimum)
+    if actual < base_minimum:
+        return BaseMinimumComparison(MinimumComparison.LESS, base_minimum - actual)
+    return BaseMinimumComparison(MinimumComparison.EQUAL, Money.zero())
+
+
 class SetupStatus(StrEnum):
     """Стан первинного налаштування (ADR 0010–0013)."""
 
