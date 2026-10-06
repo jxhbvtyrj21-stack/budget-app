@@ -103,7 +103,7 @@ def test_quarantine_then_restore_from_automatic_backup(populated, paths, clock):
     path = next(p for p in created if p.name.endswith("-daily.db"))
     expected = snapshot(connection)
     connection.close()
-    recovery = RecoveryService(paths.database, clock)
+    recovery = RecoveryService(paths.database, paths.backups, clock)
     quarantined = recovery.quarantine_corrupted()
     assert quarantined.exists() and not paths.database.exists()
     recovery.restore(path)

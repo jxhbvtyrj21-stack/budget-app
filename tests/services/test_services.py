@@ -53,7 +53,7 @@ def test_corrupted_database_is_reported_and_quarantined(paths):
     database_path.write_bytes(b"garbage" * 1000)
     with pytest.raises(DatabaseCorruptedError):
         prepare_database(database_path, backups_dir, CLOCK)
-    quarantined = RecoveryService(database_path, CLOCK).quarantine_corrupted()
+    quarantined = RecoveryService(database_path, backups_dir, CLOCK).quarantine_corrupted()
     assert quarantined.name.startswith("budget.db.corrupted-")
     assert not database_path.exists()
 

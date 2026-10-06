@@ -127,7 +127,7 @@ def test_source_corruption_goes_to_quarantine_without_writes(paths, clock, monke
     assert backup_names(paths) == before
     assert digest(paths.database) == database_digest  # у пошкоджену базу нічого не записано
     # З'єднання закрито — файл можна перенести в карантин (і на Windows).
-    quarantined = RecoveryService(paths.database, clock).quarantine_corrupted()
+    quarantined = RecoveryService(paths.database, paths.backups, clock).quarantine_corrupted()
     assert quarantined.exists() and not paths.database.exists()
 
 

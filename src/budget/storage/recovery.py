@@ -25,36 +25,41 @@ def database_files(database_path: Path) -> list[Path]:
     return [database_path, *(database_path.with_name(database_path.name + s) for s in _SIDE_FILES)]
 
 
-def set_aside_database(database_path: Path, label: str) -> Path:
-    """Переносить ``.db`` разом із ``-wal``/``-shm`` під назву ``<назва>.<label>``.
+def move_database_files(source: Path, target: Path) -> Path:
+    """Переносить ``.db`` разом із ``-wal``/``-shm`` з ``source`` на ``target``.
 
-    Нічого не записує в базу. Якщо якийсь файл перенести не вдалося (напр., його
-    тримає інший процес у Windows), уже перенесені повертаються на місце — пара
-    не розривається — і виникає ``StorageError``.
+    Нічого не записує в базу. Жоден із файлів ``target`` не повинен існувати. Якщо
+    якийсь файл перенести не вдалося (напр., його тримає інший процес у Windows),
+    уже перенесені повертаються назад — пара не розривається — і виникає ``StorageError``.
     """
-    target = _free_name(database_path.with_name(f"{database_path.name}.{label}"))
+    if any(p.exists() for p in database_files(target)):
+        raise StorageError(detail=f"Файли бази вже існують: {target}")
     moves = [
-        (source, destination)
-        for source, destination in zip(
-            database_files(database_path), database_files(target), strict=True
-        )
-        if source.exists()
+        (old, new)
+        for old, new in zip(database_files(source), database_files(target), strict=True)
+        if old.exists()
     ]
     if not moves:
-        raise StorageError(detail=f"Немає файлів бази для перенесення: {database_path}")
+        raise StorageError(detail=f"Немає файлів бази для перенесення: {source}")
     done: list[tuple[Path, Path]] = []
     try:
-        for source, destination in moves:
-            source.rename(destination)
-            done.append((source, destination))
+        for old, new in moves:
+            old.rename(new)
+            done.append((old, new))
     except OSError as exc:
-        for source, destination in reversed(done):
+        for old, new in reversed(done):
             try:
-                destination.rename(source)
+                new.rename(old)
             except OSError:
-                log.exception("Не вдалося повернути %s на місце", destination)
-        raise StorageError(detail=f"Не вдалося перенести {source}: {exc}") from exc
+                log.exception("Не вдалося повернути %s на місце", new)
+        raise StorageError(detail=f"Не вдалося перенести файли бази {source}: {exc}") from exc
     return target
+
+
+def set_aside_database(database_path: Path, label: str) -> Path:
+    """Переносить файли бази вбік під назву ``<назва>.<label>`` (вільну)."""
+    target = _free_name(database_path.with_name(f"{database_path.name}.{label}"))
+    return move_database_files(database_path, target)
 
 
 def _free_name(path: Path) -> Path:

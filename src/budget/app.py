@@ -13,7 +13,7 @@ from budget.errors import BudgetError, DatabaseCorruptedError, StartupError
 from budget.platform.identity import ProductIdentity, load_product_identity
 from budget.platform.paths import DataPaths, data_paths
 from budget.platform.resources import assets_dir
-from budget.services.backup import BackupService, RecoveryService
+from budget.services.backup import BackupService, RecoveryService, RestoreError
 from budget.services.startup import prepare_database
 from budget.storage.integrity import quick_check
 
@@ -70,6 +70,32 @@ def open_application_database(paths: DataPaths, clock: Clock) -> sqlite3.Connect
     except BaseException:
         connection.close()
         raise
+    return connection
+
+
+def restore_and_open(paths: DataPaths, clock: Clock, backup_path: Path) -> sqlite3.Connection:
+    """Відновлює базу з копії й відкриває її звичайним шляхом запуску (DS-6).
+
+    Після заміни файлів база проходить ``quick_check``, обов'язкову копію перед
+    міграцією й міграції, автоматичні копії та повну перевірку цілісності. Лише
+    тоді з'єднання повертається застосунку. Будь-яка невдача — ``RestoreError``,
+    а файли бази повертаються до стану перед спробою.
+    """
+    recovery = RecoveryService(paths.database, paths.backups, clock)
+    outcome = recovery.restore(backup_path)
+    try:
+        connection = open_application_database(paths, clock)
+    except BudgetError as exc:
+        log.exception("Restored database failed to open")
+        recovery.rollback(outcome)
+        raise RestoreError(detail=f"Відновлена база не відкрилася: {exc.detail}") from exc
+    try:
+        recovery.check_restored(connection)
+    except BudgetError:
+        connection.close()
+        recovery.rollback(outcome)
+        raise
+    recovery.finish(outcome)
     return connection
 
 
@@ -136,7 +162,7 @@ def _handle_corrupted_database(
     Вибір резервної копії для відновлення в інтерфейсі — наступний етап.
     """
     try:
-        quarantined = RecoveryService(paths.database, clock).quarantine_corrupted()
+        quarantined = RecoveryService(paths.database, paths.backups, clock).quarantine_corrupted()
     except BudgetError:
         log.exception("Quarantine failed")
         _show_message(identity.name, error.user_message)

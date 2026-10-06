@@ -2,7 +2,7 @@
 
 Вид і час копії визначаються лише з назви файлу ``budget-YYYYMMDD-HHMMSS-<вид>.db``;
 окремої таблиці чи метаданих у базі немає. Час у назві — за Europe/Kyiv (``Clock``).
-Сценарій відновлення в інтерфейсі реалізується на наступних етапах.
+Відновлення після пошкодження — ``RecoveryService`` (DS-6; IA 10.1).
 """
 
 import logging
@@ -17,7 +17,17 @@ from pathlib import Path
 from budget.domain.calendar import CalendarMonth, Clock
 from budget.errors import DatabaseCorruptedError, StorageError
 from budget.storage.backup import backup_database
-from budget.storage.recovery import quarantine_database, restore_from_backup, verify_backup
+from budget.storage.database import open_database
+from budget.storage.integrity import integrity_check
+from budget.storage.recovery import (
+    database_files,
+    discard_database,
+    move_database_files,
+    quarantine_database,
+    restore_from_backup,
+    set_aside_database,
+    verify_backup,
+)
 
 log = logging.getLogger(__name__)
 
@@ -208,14 +218,127 @@ def _timestamp(clock: Clock) -> str:
     return clock.now().strftime(_TIMESTAMP_FORMAT)
 
 
+class RestoreError(StorageError):
+    """Відновлення не завершене; попередній стан файлів бази повернуто (DS-6)."""
+
+    default_message = (
+        "Не вдалося відновити дані з вибраної копії. Попередній стан файлів даних "
+        "залишився без змін."
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreOutcome:
+    """Що зроблено під час заміни бази; потрібне, щоб завершити або відкотити відновлення."""
+
+    backup: Path
+    before_restore: Path | None  # перевірена копія поточного стану (BEFORE_RESTORE)
+    set_aside: Path | None  # попередні файли бази, перенесені вбік разом із -wal/-shm
+    current_was_corrupted: bool
+
+
 class RecoveryService:
-    def __init__(self, database_path: Path, clock: Clock) -> None:
+    """Карантин і відновлення бази з резервної копії (DS-5, DS-6).
+
+    Перед відновленням усі з'єднання з базою мають бути закриті. Відновлення
+    складається з ``restore`` (заміна файлів), повторного відкриття бази звичайним
+    шляхом запуску і ``finish`` або ``rollback`` залежно від його результату.
+    """
+
+    def __init__(self, database_path: Path, backups_dir: Path, clock: Clock) -> None:
         self._database_path = database_path
+        self._backups_dir = backups_dir
         self._clock = clock
 
     def quarantine_corrupted(self) -> Path:
         """Зберігає пошкоджену базу під новою назвою, нічого в неї не записуючи."""
         return quarantine_database(self._database_path, _timestamp(self._clock))
 
-    def restore(self, backup_path: Path) -> None:
-        restore_from_backup(backup_path, self._database_path)
+    def candidates(self) -> list[RestoreCandidate]:
+        return restore_candidates(self._backups_dir)
+
+    def restore(self, backup_path: Path) -> RestoreOutcome:
+        """Замінює базу вибраною копією.
+
+        1. Копія має пройти повну перевірку цілісності.
+        2. Якщо поточна база є, спершу створюється копія ``BEFORE_RESTORE`` з тими
+           самими перевірками, що й будь-яка копія (DS-4). Пошкоджену поточну базу
+           копією не видають: її файли зберігаються як карантин (DS-6).
+        3. Поточні ``.db``/``-wal``/``-shm`` переносяться вбік разом.
+        4. Копія атомарно стає на місце бази. Невдача — файли повертаються на місце.
+        """
+        if not verify_backup(backup_path):
+            raise RestoreError(
+                "Вибрана копія пошкоджена або не підходить для відновлення. Оберіть іншу копію.",
+                detail=f"Копія не пройшла перевірку: {backup_path}",
+            )
+        stamp = _timestamp(self._clock)
+        before_restore, corrupted = None, False
+        if self._database_path.exists():
+            try:
+                before_restore = self._backup_current()
+            except DatabaseCorruptedError:
+                corrupted = True
+            except StorageError as exc:
+                raise RestoreError(
+                    "Не вдалося створити резервну копію поточних даних, тому відновлення "
+                    "не виконано. Поточні дані не змінено.",
+                    detail=f"Копію перед відновленням не створено: {exc.detail}",
+                ) from exc
+        set_aside = None
+        if any(p.exists() for p in database_files(self._database_path)):
+            if not self._database_path.exists():
+                label = f"orphaned-{stamp}"  # залишки WAL без бази: зберегти, але прибрати
+            else:
+                label = f"{'corrupted' if corrupted else 'replaced'}-{stamp}"
+            try:
+                set_aside = set_aside_database(self._database_path, label)
+            except StorageError as exc:
+                raise RestoreError(detail=exc.detail) from exc
+        try:
+            restore_from_backup(backup_path, self._database_path)
+        except StorageError as exc:
+            self._put_back(set_aside)
+            raise RestoreError(detail=exc.detail) from exc
+        return RestoreOutcome(backup_path, before_restore, set_aside, corrupted)
+
+    def check_restored(self, connection: sqlite3.Connection) -> None:
+        """Повна перевірка відкритої відновленої бази."""
+        if not integrity_check(connection):
+            raise RestoreError(detail="Відновлена база не пройшла integrity_check")
+
+    def finish(self, outcome: RestoreOutcome) -> None:
+        """Відновлення вдалося. Замінену справну базу, збережену копією, прибрати."""
+        if outcome.set_aside is not None and outcome.before_restore is not None:
+            try:
+                discard_database(outcome.set_aside)
+            except OSError:
+                log.warning("Не вдалося прибрати %s", outcome.set_aside, exc_info=True)
+
+    def rollback(self, outcome: RestoreOutcome) -> None:
+        """Відновлення не вдалося після заміни: повернути попередні файли бази.
+
+        Відновлений файл — лише копія резервної копії, яка лишається на місці.
+        """
+        try:
+            discard_database(self._database_path)
+        except OSError as exc:
+            raise RestoreError(detail=f"Не вдалося прибрати відновлену базу: {exc}") from exc
+        self._put_back(outcome.set_aside)
+
+    def _backup_current(self) -> Path:
+        connection = open_database(self._database_path)
+        try:
+            return BackupService(connection, self._backups_dir, self._clock).create_backup(
+                BackupKind.BEFORE_RESTORE
+            )
+        finally:
+            connection.close()
+
+    def _put_back(self, set_aside: Path | None) -> None:
+        if set_aside is None:
+            return
+        try:
+            move_database_files(set_aside, self._database_path)
+        except StorageError as exc:
+            raise RestoreError(detail=exc.detail) from exc
