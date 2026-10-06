@@ -99,21 +99,31 @@ def restore_and_open(paths: DataPaths, clock: Clock, backup_path: Path) -> sqlit
     return connection
 
 
+def apply_theme() -> None:
+    """Шрифти й таблиця стилів застосунку — один раз на процес."""
+    from PySide6.QtWidgets import QApplication
+
+    from budget.ui.theme.stylesheet import build_stylesheet
+    from budget.ui.theme.typography import register_fonts
+
+    application = QApplication.instance()
+    if application.property("budgetThemeApplied"):
+        return
+    families = register_fonts(assets_dir() / "fonts")
+    application.setStyleSheet(build_stylesheet(families))
+    application.setProperty("budgetThemeApplied", True)
+
+
 def build_main_window(identity: ProductIdentity, connection: sqlite3.Connection, clock: Clock):
     """Створює головне вікно з темою; фінансові екрани — лише після налаштування.
 
     Перед побудовою виконується перехід між місяцями для доходів (ADR 0009).
     """
-    from PySide6.QtWidgets import QApplication
 
     from budget.services.facade import AppServices
     from budget.ui.main_window import MainWindow
-    from budget.ui.theme.stylesheet import build_stylesheet
-    from budget.ui.theme.typography import register_fonts
 
-    application = QApplication.instance()
-    families = register_fonts(assets_dir() / "fonts")
-    application.setStyleSheet(build_stylesheet(families))
+    apply_theme()
     services = AppServices.create(connection, clock)
     services.transitions.run_on_startup()
     return MainWindow(identity.name, services)
@@ -138,7 +148,9 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
         connection = open_application_database(paths, clock)
     except DatabaseCorruptedError as exc:
         log.exception("Database corrupted")
-        return _handle_corrupted_database(identity, paths, clock, exc)
+        connection = _recover_corrupted_database(identity, paths, clock, exc)
+        if connection is None:
+            return EXIT_DATA_CORRUPTED
     except BudgetError as exc:
         log.exception("Startup failed")
         _show_message(identity.name, exc.user_message)
@@ -154,24 +166,33 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
         lock.unlock()
 
 
-def _handle_corrupted_database(
+def _recover_corrupted_database(
     identity: ProductIdentity, paths: DataPaths, clock: Clock, error: DatabaseCorruptedError
-) -> int:
-    """Пошкоджена база: нічого не записуємо, зберігаємо файл під новою назвою (DS-6).
+) -> sqlite3.Connection | None:
+    """Пошкоджена база: нічого не записуємо, зберігаємо файли під новою назвою (DS-6),
+    потім діалог «Дані пошкоджено» з відновленням із вибраної справної копії (IA 10.1).
 
-    Вибір резервної копії для відновлення в інтерфейсі — наступний етап.
+    Повертає відкриту відновлену базу або ``None``, якщо користувач закрив застосунок.
     """
+    from budget.ui.dialogs.recovery_dialog import RecoveryDialog
+
+    recovery = RecoveryService(paths.database, paths.backups, clock)
     try:
-        quarantined = RecoveryService(paths.database, paths.backups, clock).quarantine_corrupted()
+        quarantined = recovery.quarantine_corrupted()
     except BudgetError:
         log.exception("Quarantine failed")
         _show_message(identity.name, error.user_message)
-        return EXIT_DATA_CORRUPTED
-    _show_message(
-        identity.name,
-        f"{error.user_message}\nПошкоджений файл збережено як «{quarantined.name}» у теці даних.",
+        return None
+    apply_theme()
+    dialog = RecoveryDialog(
+        quarantined.name,
+        load=recovery.candidates,
+        restore=lambda candidate: restore_and_open(paths, clock, candidate.backup.path),
     )
-    return EXIT_DATA_CORRUPTED
+    if not dialog.exec():
+        return None
+    log.info("Database restored from %s", dialog.selected().backup.path.name)
+    return dialog.restored
 
 
 def _show_fatal(error: BudgetError) -> None:

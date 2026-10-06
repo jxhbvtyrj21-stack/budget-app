@@ -1,8 +1,10 @@
-"""Єдине місце форматування сум і місяців для показу (design-system.md, 3.3).
+"""Єдине місце форматування сум, місяців, дат і розмірів для показу (design-system.md, 3.3).
 
 Розділювачі — за ``QLocale`` ``uk_UA``; позначка валюти не показується (ADR 0008);
 копійки — лише якщо вони не нульові; округлення не виконується.
 """
+
+from datetime import datetime
 
 from PySide6.QtCore import QLocale
 
@@ -24,6 +26,17 @@ def format_month(month: CalendarMonth) -> str:
     """Назва місяця з роком, наприклад «Жовтень 2026»."""
     name = _LOCALE.standaloneMonthName(month.month, QLocale.FormatType.LongFormat)
     return f"{name[:1].upper()}{name[1:]} {month.year}"
+
+
+def format_moment(moment: datetime) -> str:
+    """Дата й час, наприклад «6 жовтня 2026, 12:00» (час — як у назві копії, за Києвом)."""
+    month = _LOCALE.monthName(moment.month, QLocale.FormatType.LongFormat)
+    return f"{moment.day} {month} {moment.year}, {moment:%H:%M}"
+
+
+def format_size(size: int) -> str:
+    """Розмір файлу: «84,0 кБ», «1,2 МБ»."""
+    return _LOCALE.formattedDataSize(size, 1, QLocale.DataSizeFormat.DataSizeTraditionalFormat)
 
 
 def parse_money_input(text: str) -> Money | None:
