@@ -28,8 +28,8 @@ UNKNOWN = (
     "budget-20200101-000000-daily.db.tmp",
     "budget-20200101-000000-daily.db-wal",
     "budget-20201301-000000-daily.db",  # неможлива дата
-    "Budget-20200101-000000-daily.db",
-    "budget-20200101-000000-Daily.db",
+    "Budget-20200102-000000-daily.db",
+    "budget-20200103-000000-Daily.db",
     "budget-20200101-000000-daily (1).db",
     "copy-budget-20200101-000000-daily.db",
     "budget.db",
@@ -86,6 +86,12 @@ def test_protected_kinds_and_unknown_files_survive_many_rotations(setup, clock):
     assert len(names(backups_dir, BackupKind.DAILY)) == 7
     assert len(names(backups_dir, BackupKind.WEEKLY)) == 4
     assert len(names(backups_dir, BackupKind.MONTHLY)) == 12
+
+
+def test_seed_names_are_distinct_on_case_insensitive_file_systems():
+    """На Windows назви, що різняться лише регістром, — той самий файл."""
+    seeded = PROTECTED + UNKNOWN
+    assert len({name.casefold() for name in seeded}) == len(seeded)
 
 
 def test_unknown_names_are_not_classified():
