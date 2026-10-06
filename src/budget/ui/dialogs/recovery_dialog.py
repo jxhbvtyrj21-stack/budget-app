@@ -20,27 +20,18 @@ from PySide6.QtWidgets import (
 )
 
 from budget.errors import BudgetError
-from budget.services.backup import BackupKind, RestoreCandidate
+from budget.services.backup import RestoreCandidate
 from budget.ui.components.basic import button, text_label
 from budget.ui.components.forms import Notice
-from budget.ui.formatting import format_moment, format_size
+from budget.ui.formatting import format_backup_kind, format_moment, format_size
 from budget.ui.messages import user_text
 from budget.ui.theme.tokens import SPACING
-
-KIND_LABELS = {
-    BackupKind.DAILY: "Щоденна",
-    BackupKind.WEEKLY: "Щотижнева",
-    BackupKind.MONTHLY: "Щомісячна",
-    BackupKind.BEFORE_MIGRATION: "Перед міграцією",
-    BackupKind.ON_DEMAND: "На вимогу",
-    BackupKind.BEFORE_RESTORE: "Перед відновленням",
-}
 
 
 def candidate_text(candidate: RestoreCandidate) -> str:
     backup = candidate.backup
     return (
-        f"{format_moment(backup.created)} · {KIND_LABELS[backup.kind]} · "
+        f"{format_moment(backup.created)} · {format_backup_kind(backup.kind)} · "
         f"{format_size(candidate.size)}"
     )
 

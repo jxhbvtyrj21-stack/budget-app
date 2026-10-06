@@ -172,6 +172,10 @@ class BackupService:
     def list_backups(self) -> list[Path]:
         return [b.path for b in self.backups()]
 
+    def candidates(self) -> list[RestoreCandidate]:
+        """Справні копії для показу й відновлення (ті самі правила, що й DS-6)."""
+        return restore_candidates(self._backups_dir)
+
     def run_automatic(self) -> list[Path]:
         """Створює автоматичні копії, яких ще немає за поточний період (DS-5).
 

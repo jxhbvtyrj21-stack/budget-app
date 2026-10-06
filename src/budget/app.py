@@ -114,7 +114,12 @@ def apply_theme() -> None:
     application.setProperty("budgetThemeApplied", True)
 
 
-def build_main_window(identity: ProductIdentity, connection: sqlite3.Connection, clock: Clock):
+def build_main_window(
+    identity: ProductIdentity,
+    connection: sqlite3.Connection,
+    clock: Clock,
+    backups_dir: Path | None = None,
+):
     """Створює головне вікно з темою; фінансові екрани — лише після налаштування.
 
     Перед побудовою виконується перехід між місяцями для доходів (ADR 0009).
@@ -124,7 +129,7 @@ def build_main_window(identity: ProductIdentity, connection: sqlite3.Connection,
     from budget.ui.main_window import MainWindow
 
     apply_theme()
-    services = AppServices.create(connection, clock)
+    services = AppServices.create(connection, clock, backups_dir)
     services.transitions.run_on_startup()
     return MainWindow(identity.name, services)
 
@@ -155,7 +160,7 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
         log.exception("Startup failed")
         _show_message(identity.name, exc.user_message)
         return EXIT_STARTUP_FAILED
-    window = build_main_window(identity, connection, clock)
+    window = build_main_window(identity, connection, clock, paths.backups)
     window.show()
     # Спеціальний діалог після тривалої перерви: один, без автоматичного вибору.
     window.open_long_gap_dialog()

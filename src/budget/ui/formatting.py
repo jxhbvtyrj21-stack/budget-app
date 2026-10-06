@@ -10,6 +10,7 @@ from PySide6.QtCore import QLocale
 
 from budget.domain.calendar import CalendarMonth
 from budget.domain.money import Money
+from budget.services.backup import BackupKind
 
 _LOCALE = QLocale(QLocale.Language.Ukrainian, QLocale.Country.Ukraine)
 
@@ -37,6 +38,21 @@ def format_moment(moment: datetime) -> str:
 def format_size(size: int) -> str:
     """Розмір файлу: «84,0 кБ», «1,2 МБ»."""
     return _LOCALE.formattedDataSize(size, 1, QLocale.DataSizeFormat.DataSizeTraditionalFormat)
+
+
+BACKUP_KIND_LABELS = {
+    BackupKind.DAILY: "Щоденна",
+    BackupKind.WEEKLY: "Щотижнева",
+    BackupKind.MONTHLY: "Щомісячна",
+    BackupKind.BEFORE_MIGRATION: "Перед міграцією",
+    BackupKind.ON_DEMAND: "На вимогу",
+    BackupKind.BEFORE_RESTORE: "Перед відновленням",
+}
+
+
+def format_backup_kind(kind: BackupKind) -> str:
+    """Вид резервної копії (IA 8)."""
+    return BACKUP_KIND_LABELS[kind]
 
 
 def parse_money_input(text: str) -> Money | None:

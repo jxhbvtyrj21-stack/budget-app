@@ -19,6 +19,7 @@ from budget.ui.screens.debts import DebtsPage
 from budget.ui.screens.month import MonthPage
 from budget.ui.screens.overview import OverviewPage
 from budget.ui.screens.placeholders import PlaceholderPage
+from budget.ui.screens.service import ServicePage
 from budget.ui.screens.setup_wizard import SetupWizardPage
 from budget.ui.theme.tokens import WINDOW_DEFAULT_SIZE, WINDOW_MIN_SIZE
 
@@ -57,6 +58,7 @@ class MainWindow(QMainWindow):
         self._routes.clear()
         self.sidebar = None
         self.wizard = None
+        self.service = None
         self.pages = QStackedWidget()
         central = QWidget()
         layout = QHBoxLayout(central)
@@ -97,8 +99,14 @@ class MainWindow(QMainWindow):
         self.overview.debts_requested.connect(lambda: self.navigate("debts"))
         self.overview.month_requested.connect(self.open_current_month)
         self.overview.changed.connect(self.refresh)
+        # «Сервіс» потребує теки резервних копій; без неї (лише в тестах) — заглушка.
+        self.service = None
+        if self._services.backups is not None:
+            self.service = ServicePage(self._services.backups)
+            self._add_route("service", self.service)
         for route, title in FOOTER_ROUTES:
-            self._add_route(route, PlaceholderPage(title))
+            if route not in self._routes:
+                self._add_route(route, PlaceholderPage(title))
         for index, (route, _) in enumerate(MAIN_ROUTES, start=1):
             shortcut = QShortcut(QKeySequence(f"Ctrl+{index}"), self)
             shortcut.activated.connect(lambda r=route: self.navigate(r))
@@ -123,6 +131,8 @@ class MainWindow(QMainWindow):
         return next(route for route, page in self._routes.items() if page is current)
 
     def navigate(self, route: str) -> None:
+        if route == "service" and self.service is not None:
+            self.service.refresh()  # копії могли з'явитися під час роботи
         self.pages.setCurrentWidget(self._routes[route])
         if self.sidebar is not None:
             self.sidebar.set_active(route)

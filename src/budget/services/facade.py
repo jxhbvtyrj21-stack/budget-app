@@ -2,9 +2,11 @@
 
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
 from budget.domain.calendar import Clock
 from budget.services.accumulation import AccumulationService
+from budget.services.backup import BackupService
 from budget.services.balances import BalanceService
 from budget.services.base_minimum import BaseMinimumService
 from budget.services.debt import DebtService
@@ -29,9 +31,12 @@ class AppServices:
     balances: BalanceService
     months: MonthService
     transitions: MonthTransitionService
+    backups: BackupService | None = None  # лише коли відома тека копій (екран «Сервіс»)
 
     @classmethod
-    def create(cls, connection: sqlite3.Connection, clock: Clock) -> "AppServices":
+    def create(
+        cls, connection: sqlite3.Connection, clock: Clock, backups_dir: Path | None = None
+    ) -> "AppServices":
         return cls(
             setup=InitialSetupService(connection, clock),
             incomes=IncomeService(connection, clock),
@@ -44,4 +49,5 @@ class AppServices:
             balances=BalanceService(connection),
             months=MonthService(clock),
             transitions=MonthTransitionService(connection, clock),
+            backups=None if backups_dir is None else BackupService(connection, backups_dir, clock),
         )
