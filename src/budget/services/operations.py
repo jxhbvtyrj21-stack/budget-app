@@ -1,4 +1,5 @@
-"""Межі сервісів фінансових операцій. Сценарії реалізуються на наступних етапах.
+"""Межі сервісів фінансових операцій. Сценарії реалізуються на наступних етапах;
+доходи — ``budget.services.income``.
 
 Кожен сервіс перед зміною даних викликає ``require_normal_operation`` (Q190), сам
 відкриває транзакцію й застосовує правила поточного місяця через ``MonthService``.
@@ -14,14 +15,6 @@ class _OperationService:
     def __init__(self, connection: sqlite3.Connection, clock: Clock) -> None:
         self._connection = connection
         self._months = MonthService(clock)
-
-
-class IncomeService(_OperationService):
-    """Створення доходу поточного місяця; дохід незмінний, без видалення й скасування.
-
-    Залишок похідний; автоматичне архівування при нульовому залишку й під час
-    переходу місяця (ADR 0009, ADR 0022).
-    """
 
 
 class ExpenseService(_OperationService):
