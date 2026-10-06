@@ -5,8 +5,10 @@
 Сценарій відновлення в інтерфейсі реалізується на наступних етапах.
 """
 
+import logging
 import re
 import sqlite3
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -15,6 +17,8 @@ from pathlib import Path
 from budget.domain.calendar import Clock
 from budget.storage.backup import backup_database
 from budget.storage.recovery import quarantine_database, restore_from_backup
+
+log = logging.getLogger(__name__)
 
 BACKUP_SUFFIX = ".db"
 _TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
@@ -73,6 +77,23 @@ def newest_first(backups: list[BackupInfo]) -> list[BackupInfo]:
     return sorted(backups, key=lambda b: (b.created, b.path.name), reverse=True)
 
 
+@dataclass(frozen=True, slots=True)
+class RotationPolicy:
+    """Автоматичний пул копій: одна копія на календарний період, зберігається ``keep``."""
+
+    kind: BackupKind
+    keep: int
+    period: Callable[[datetime], Hashable]
+
+
+def calendar_day(moment: datetime) -> Hashable:
+    return moment.date()
+
+
+DAILY = RotationPolicy(BackupKind.DAILY, 7, calendar_day)
+AUTOMATIC_POLICIES: tuple[RotationPolicy, ...] = (DAILY,)
+
+
 class BackupService:
     def __init__(self, connection: sqlite3.Connection, backups_dir: Path, clock: Clock) -> None:
         self._connection = connection
@@ -94,6 +115,39 @@ class BackupService:
 
     def list_backups(self) -> list[Path]:
         return [b.path for b in self.backups()]
+
+    def run_automatic(self) -> list[Path]:
+        """Створює автоматичні копії, яких ще немає за поточний період (DS-5).
+
+        Для кожного пулу: якщо копії цього виду за поточний календарний період немає —
+        створити й перевірити нову, і лише після цього застосувати ротацію саме цього
+        пулу. Помилка створення пробрасується, а наявні копії лишаються незмінними.
+        """
+        created = []
+        for policy in AUTOMATIC_POLICIES:
+            path = self._ensure_period_backup(policy)
+            if path is not None:
+                created.append(path)
+        return created
+
+    def _ensure_period_backup(self, policy: RotationPolicy) -> Path | None:
+        current = policy.period(self._clock.now().replace(tzinfo=None))
+        pool = [b for b in self.backups() if b.kind is policy.kind]
+        if any(policy.period(b.created) == current for b in pool):
+            return None
+        path = self.create_backup(policy.kind)
+        self._rotate(policy)
+        return path
+
+    def _rotate(self, policy: RotationPolicy) -> None:
+        """Лишає ``keep`` найновіших копій пулу; копії інших видів не зачіпає."""
+        pool = [b for b in self.backups() if b.kind is policy.kind]
+        for stale in pool[policy.keep :]:
+            try:
+                stale.path.unlink(missing_ok=True)
+            except OSError:
+                # Напр., файл тимчасово зайнятий на Windows: лишається до наступної ротації.
+                log.warning("Не вдалося видалити застарілу копію %s", stale.path, exc_info=True)
 
 
 def _timestamp(clock: Clock) -> str:
