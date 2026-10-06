@@ -151,3 +151,47 @@ def test_weekly_rotation_keeps_four_and_spares_other_pools(setup, clock):
     weekly = kinds(backups_dir, BackupKind.WEEKLY)
     assert len(weekly) == 4 and "budget-20261006-120000-weekly.db" not in weekly
     assert len(kinds(backups_dir, BackupKind.DAILY)) == 5  # щоденні не зачеплено
+
+
+# Щомісячні --------------------------------------------------------------------------------
+
+
+def months_later(count: int) -> datetime:
+    year, month = divmod(10 - 1 + count, 12)
+    return datetime(2026 + year, month + 1, 6, 9, 0, tzinfo=UTC)
+
+
+def test_first_launch_of_month_creates_separate_monthly(setup):
+    service, backups_dir = setup
+    service.run_automatic()
+    assert kinds(backups_dir, BackupKind.MONTHLY) == ["budget-20261006-120000-monthly.db"]
+
+
+def test_repeated_launch_same_month_no_duplicate(setup, clock):
+    service, backups_dir = setup
+    service.run_automatic()
+    clock.set(datetime(2026, 10, 31, 20, 59, tzinfo=UTC))  # 31 жовтня, 22:59 за Києвом
+    service.run_automatic()
+    assert len(kinds(backups_dir, BackupKind.MONTHLY)) == 1
+
+
+def test_next_month_by_kyiv_time(setup, clock):
+    service, backups_dir = setup
+    service.run_automatic()
+    clock.set(datetime(2026, 10, 31, 22, 30, tzinfo=UTC))  # уже 1 листопада, 00:30 за Києвом
+    service.run_automatic()
+    assert kinds(backups_dir, BackupKind.MONTHLY) == [
+        "budget-20261006-120000-monthly.db",
+        "budget-20261101-003000-monthly.db",
+    ]
+
+
+def test_monthly_rotation_keeps_twelve_and_spares_other_pools(setup, clock):
+    service, backups_dir = setup
+    for month in range(13):
+        clock.set(months_later(month))
+        service.run_automatic()
+    monthly = kinds(backups_dir, BackupKind.MONTHLY)
+    assert len(monthly) == 12 and "budget-20261006-120000-monthly.db" not in monthly
+    assert len(kinds(backups_dir, BackupKind.DAILY)) == 7
+    assert len(kinds(backups_dir, BackupKind.WEEKLY)) == 4

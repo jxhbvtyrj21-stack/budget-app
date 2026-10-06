@@ -14,7 +14,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
-from budget.domain.calendar import Clock
+from budget.domain.calendar import CalendarMonth, Clock
 from budget.storage.backup import backup_database
 from budget.storage.recovery import quarantine_database, restore_from_backup
 
@@ -96,9 +96,15 @@ def calendar_week(moment: datetime) -> Hashable:
     return year, week
 
 
+def calendar_month(moment: datetime) -> Hashable:
+    """Календарний місяць (ADR 0009); час у назві копії вже київський."""
+    return CalendarMonth(moment.year, moment.month)
+
+
 DAILY = RotationPolicy(BackupKind.DAILY, 7, calendar_day)
 WEEKLY = RotationPolicy(BackupKind.WEEKLY, 4, calendar_week)
-AUTOMATIC_POLICIES: tuple[RotationPolicy, ...] = (DAILY, WEEKLY)
+MONTHLY = RotationPolicy(BackupKind.MONTHLY, 12, calendar_month)
+AUTOMATIC_POLICIES: tuple[RotationPolicy, ...] = (DAILY, WEEKLY, MONTHLY)
 
 
 class BackupService:
