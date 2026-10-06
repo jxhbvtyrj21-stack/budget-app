@@ -12,7 +12,10 @@ from budget.domain.models import (
     AccumulationStatus,
     Debt,
     DebtOrigin,
+    Expense,
     Income,
+    SourceKind,
+    SourceRef,
 )
 from budget.domain.money import Money
 
@@ -160,6 +163,69 @@ class AccumulationRepository:
             {"id": accumulation_id},
         ).fetchone()
         return _money(total)
+
+
+def _expense(row: tuple) -> Expense:
+    expense_id, month, name, description, amount, kind, income_id, accumulation_id = row
+    return Expense(
+        expense_id,
+        CalendarMonth.parse(month),
+        name,
+        description,
+        Money(amount),
+        SourceRef(SourceKind(kind), income_id, accumulation_id),
+    )
+
+
+_EXPENSE_COLUMNS = (
+    "id, month, name, description, amount, source_kind, source_income_id, source_accumulation_id"
+)
+
+
+class ExpenseRepository:
+    """Звичайні витрати. Залишки джерел тут не змінюються й не перевіряються."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def insert(self, expense: Expense) -> int:
+        """Записує витрату; ``expense.id`` зберігається, якщо задано (заміна під час зміни)."""
+        cursor = self._connection.execute(
+            f"INSERT INTO expenses ({_EXPENSE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                expense.id,
+                str(expense.month),
+                expense.name,
+                expense.description,
+                expense.amount.kopiyky,
+                expense.source.kind.value,
+                expense.source.income_id,
+                expense.source.accumulation_id,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def get(self, expense_id: int) -> Expense | None:
+        row = self._connection.execute(
+            f"SELECT {_EXPENSE_COLUMNS} FROM expenses WHERE id = ?", (expense_id,)
+        ).fetchone()
+        return _expense(row) if row else None
+
+    def list_for_month(self, month: CalendarMonth) -> list[Expense]:
+        rows = self._connection.execute(
+            f"SELECT {_EXPENSE_COLUMNS} FROM expenses WHERE month = ? ORDER BY id DESC",
+            (str(month),),
+        )
+        return [_expense(row) for row in rows]
+
+    def update_metadata(self, expense_id: int, name: str, description: str | None) -> None:
+        self._connection.execute(
+            "UPDATE expenses SET name = ?, description = ? WHERE id = ?",
+            (name, description, expense_id),
+        )
+
+    def delete(self, expense_id: int) -> None:
+        self._connection.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
 
 
 def _debt(row: tuple) -> Debt:

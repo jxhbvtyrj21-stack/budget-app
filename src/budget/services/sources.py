@@ -104,6 +104,31 @@ class SourceLedger:
         if balance.is_zero:
             self._incomes.set_archived(income_id)
 
+    def source_name(self, source: SourceRef) -> str:
+        if source.kind is SourceKind.GENERAL_REMAINDER:
+            return GENERAL_REMAINDER_NAME
+        if source.kind is SourceKind.INCOME:
+            income = self._incomes.get(source.income_id)
+            return income.name if income else "Дохід"
+        accumulation = self._accumulations.get(source.accumulation_id)
+        return accumulation.name if accumulation else "Накопичення"
+
+    def require_financially_changeable(self, source: SourceRef) -> None:
+        """Чи можна фінансово змінити чи видалити вже наявну операцію з цим джерелом.
+
+        Архівований дохід не відновлюється (Q168, Q174); операції архівованого
+        накопичення фінансово не змінюються до розархівування (Q189).
+        """
+        if source.kind is SourceKind.INCOME:
+            self.require_income_not_revived(source.income_id)
+        elif source.kind is SourceKind.ACCUMULATION:
+            accumulation = self._accumulations.get(source.accumulation_id)
+            if accumulation is not None and accumulation.archived:
+                raise DomainRuleError(
+                    f"Накопичення «{accumulation.name}» в архіві: суми й джерела його операцій "
+                    "не змінюються. Щоб змінити їх, розархівуйте накопичення."
+                )
+
     def require_income_not_revived(self, income_id: int) -> None:
         """Q168, Q174: зміна, що повернула б кошти архівованому доходу, заблокована."""
         income = self._incomes.get(income_id)
