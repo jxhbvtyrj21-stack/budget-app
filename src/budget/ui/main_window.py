@@ -4,10 +4,13 @@
 фінансових екранів (ADR 0013, Q190). Після завершення вікно перебудовується.
 """
 
+from collections.abc import Callable
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QMainWindow, QStackedWidget, QWidget
 
+from budget.services.backup import RestoreCandidate
 from budget.services.facade import AppServices
 from budget.ui.components.sidebar import Sidebar
 from budget.ui.dialogs.expense_dialog import ExpenseDialog
@@ -44,7 +47,14 @@ class MainWindow(QMainWindow):
         self.wizard: SetupWizardPage | None = None
         self._routes: dict[str, QWidget] = {}
         self._shortcuts: list[QShortcut] = []
+        self._restore_handler: Callable[[RestoreCandidate], str | None] | None = None
         self._build_for_services()
+
+    def set_restore_handler(self, handler: Callable[[RestoreCandidate], str | None]) -> None:
+        """Шар застосунку, що виконує відновлення з копії (S3). Обробник отримує лише
+        кандидата, вибраного на екрані «Сервіс»; повертає текст помилки, якщо дані не
+        відновлено, а робота триває, інакше ``None``. Вікно не володіє базою."""
+        self._restore_handler = handler
 
     def replace_services(self, services: AppServices) -> None:
         """Замінює граф сервісів: старий стає недосяжним з вікна, вміст будується заново.
@@ -125,6 +135,7 @@ class MainWindow(QMainWindow):
         self.service = None
         if self._services.backups is not None:
             self.service = ServicePage(self._services.backups, self.windowTitle())
+            self.service.restore_requested.connect(self._on_restore_requested)
             self._add_route("service", self.service)
         for route, title in FOOTER_ROUTES:
             if route not in self._routes:
@@ -190,6 +201,14 @@ class MainWindow(QMainWindow):
         if dialog.exec() and dialog.choice is not None:
             self._services.transitions.resolve_long_gap(dialog.choice)
         self.refresh()
+
+    def _on_restore_requested(self, candidate: RestoreCandidate) -> None:
+        if self._restore_handler is None:
+            return
+        failure = self._restore_handler(candidate)
+        if failure is not None and self.service is not None:
+            self.navigate("service")
+            self.service.show_failure(failure)
 
     def _on_setup_completed(self) -> None:
         self._build_normal()

@@ -195,8 +195,9 @@ def make_backups_unavailable(paths) -> None:
 def test_buttons_follow_the_screen_contract(window):
     page = window.service
     assert page.create_button.text() == CREATE_BACKUP and page.create_button.isEnabled()
-    # «Відновити з копії» є на екрані (IA 8), але недоступна до окремого блоку відновлення.
-    assert page.restore_button.text() == RESTORE_BACKUP and not page.restore_button.isEnabled()
+    # «Відновити з копії» (IA 8, S3) доступна, коли є справні копії; вибрано найновішу.
+    assert page.restore_button.text() == RESTORE_BACKUP and page.restore_button.isEnabled()
+    assert page.selected() is page.candidates[0]
     assert page.failure.isHidden()
 
 

@@ -4,8 +4,12 @@
 вид, розмір) і «Створити резервну копію» — копія на вимогу (DS-5). Перелік, перевірку
 й створення копій виконує ``BackupService``; екран лише показує результат. Невдача —
 повідомлення «Помилка» з причиною (IA 12); пошкодження бази, знайдене перевіркою
-перед копією, показується так само, без запуску відновлення. «Відновити з копії» поки
-недоступна: відновлення під час звичайної роботи — окремий блок.
+перед копією, показується так само, без запуску відновлення.
+
+«Відновити з копії» (S3): вибраний у таблиці кандидат із ``BackupService.candidates()``
+після підтвердження «Поточні дані буде замінено даними копії від …» передається
+сигналом ``restore_requested``. Саме відновлення (сесія, файли, новий граф сервісів)
+виконує шар застосунку; екран не отримує ні з'єднання, ні сесії, ні шляхів.
 
 «Про програму»: назва продукту (з ``product.toml`` через головне вікно) і версія з
 метаданих встановленого пакета.
@@ -14,10 +18,12 @@
 import logging
 from importlib.metadata import version
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
+    QMessageBox,
     QTableWidget,
     QTableWidgetItem,
 )
@@ -26,6 +32,7 @@ from budget.errors import BudgetError
 from budget.services.backup import BackupKind, BackupService, RestoreCandidate
 from budget.ui.components.basic import Panel, button, text_label
 from budget.ui.components.forms import Notice
+from budget.ui.dialogs.recovery_dialog import confirmation_text
 from budget.ui.formatting import format_backup_kind, format_moment, format_size
 from budget.ui.messages import user_text
 from budget.ui.screens.page import Page
@@ -46,6 +53,8 @@ def application_version() -> str:
 
 
 class ServicePage(Page):
+    restore_requested = Signal(object)  # RestoreCandidate, підтверджений користувачем
+
     def __init__(self, backups: BackupService, product_name: str) -> None:
         super().__init__("Сервіс")
         self._backups = backups
@@ -74,7 +83,7 @@ class ServicePage(Page):
         actions = QHBoxLayout()
         actions.addStretch(1)
         self.restore_button = button(RESTORE_BACKUP)
-        self.restore_button.setEnabled(False)  # відновлення під час роботи — окремий блок
+        self.restore_button.clicked.connect(self.request_restore)
         self.create_button = button(CREATE_BACKUP, "primary")
         self.create_button.clicked.connect(self.create_backup)
         actions.addWidget(self.restore_button)
@@ -107,6 +116,36 @@ class ServicePage(Page):
         has_rows = bool(self.candidates)
         self.table.setVisible(has_rows)
         self.empty.setVisible(not has_rows)
+        if has_rows:
+            self.table.selectRow(0)  # найновіша справна копія
+        self.restore_button.setEnabled(has_rows)
+
+    def selected(self) -> RestoreCandidate | None:
+        rows = self.table.selectionModel().selectedRows()
+        return self.candidates[rows[0].row()] if rows else None
+
+    def request_restore(self) -> None:
+        """Підтвердження й запит на відновлення вибраної копії; без вибору — нічого."""
+        candidate = self.selected()
+        if candidate is None or not self.confirm(candidate):
+            return
+        self.restore_requested.emit(candidate)
+
+    def confirm(self, candidate: RestoreCandidate) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(RESTORE_BACKUP)
+        box.setText(confirmation_text(candidate))
+        cancel = box.addButton("Скасувати", QMessageBox.ButtonRole.RejectRole)
+        confirm = box.addButton("Відновити", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is confirm
+
+    def show_failure(self, text: str) -> None:
+        """«Помилка» з причиною (IA 12) — для невдалого відновлення з копії."""
+        self.failure.set_text(text)
+        self.failure.show()
 
     def create_backup(self) -> None:
         """Копія на вимогу (DS-5) на з'єднанні сесії; потім оновлений перелік."""

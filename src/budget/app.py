@@ -451,6 +451,125 @@ def runtime_recovery_guard(
     return guard
 
 
+MANUAL_RESTORE_REOPEN_FAILED_MESSAGE = (
+    "Не вдалося відновити дані з вибраної копії, а продовжити роботу з поточними даними "
+    "не вдалося. Застосунок буде закритий."
+)
+MANUAL_RESTORE_ABORTED_MESSAGE = (
+    "Під час відновлення з копії сталася непередбачена помилка. Стан файлів даних не "
+    "перевірено, тому застосунок буде закритий."
+)
+
+
+class ManualRestore:
+    """Відновлення з копії на екрані «Сервіс» під час звичайної роботи (S3; IA 8; DS-5).
+
+    Це не відновлення після пошкодження: поточна база здорова, тож сесія закривається
+    звичайним ``close()``, а ``guard`` не задіяний. Далі — наявний ``restore_and_open``
+    (BEFORE_RESTORE поточного стану, заміна файлів, перевірки, відкат):
+
+    * успіх — сесія бере саме повернуте з'єднання, новий граф сервісів, ``replace_services``;
+    * ``RestoreError`` з успішним відкатом (або до будь-яких змін файлів) — попередня
+      база на місці: ``session.open()``, новий граф, причина повертається вікну;
+    * невдалий відкат, невдале повторне відкриття чи непередбачена помилка — стан не
+      гарантований: повідомлення й вихід з ``EXIT_DATA_CORRUPTED``; повторних спроб
+      у цьому процесі немає.
+
+    Переходу між місяцями й діалогу тривалої перерви немає ні після успіху, ні після
+    повторного відкриття. Інших з'єднань тут немає.
+    """
+
+    def __init__(
+        self,
+        session: ApplicationSession,
+        paths: DataPaths,
+        clock: Clock,
+        window,
+        *,
+        exit_application: Callable[[int], None],
+        show_error: Callable[[str], None],
+    ) -> None:
+        self._session = session
+        self._paths = paths
+        self._clock = clock
+        self._window = window
+        self._exit_application = exit_application
+        self._show_error = show_error
+        self._running = False
+        self.terminated = False
+        self.failure: BaseException | None = None  # невдача, після якої лише вихід
+
+    def __call__(self, candidate: RestoreCandidate) -> str | None:
+        if self._running or self.terminated:
+            log.warning("Manual restore ignored: another restore is running or has failed")
+            return None
+        self._running = True
+        self._window.setEnabled(False)
+        try:
+            return self._restore(candidate)
+        finally:
+            self._running = False
+
+    def _restore(self, candidate: RestoreCandidate) -> str | None:
+        self._session.close()
+        try:
+            connection = restore_and_open(self._paths, self._clock, candidate.backup.path)
+        except RestoreError as error:
+            if error.user_message == ROLLBACK_FAILED_MESSAGE:
+                log.exception("Manual restore failed and its rollback failed too")
+                return self._terminate(error, f"{error.user_message} {APPLICATION_WILL_CLOSE}")
+            log.warning(
+                "Manual restore from %s failed; reopening the current data",
+                candidate.backup.path.name,
+                exc_info=True,
+            )
+            return self._reopen(error)
+        except Exception as error:
+            log.exception("Manual restore failed unexpectedly")
+            return self._terminate(error, MANUAL_RESTORE_ABORTED_MESSAGE)
+        log.info("Database restored manually from %s", candidate.backup.path.name)
+        stage = "session.adopt"
+        try:
+            self._session.adopt(connection)
+            stage = "resume on the restored database"
+            self._resume(connection)
+        except Exception as error:
+            log.exception("Manual restore failed after the restore at stage: %s", stage)
+            if self._session.is_open and self._session.connection is connection:
+                self._session.close()
+            else:
+                connection.close()
+            return self._terminate(error, RESTORE_INCOMPLETE_MESSAGE)
+        return None
+
+    def _reopen(self, error: RestoreError) -> str | None:
+        """Попередня база на місці: звичайне відкриття сесії й новий граф. Невдача —
+        вихід; ``RestoreError`` лишається в ``__context__`` нової помилки."""
+        try:
+            self._session.open()
+            self._resume(self._session.connection)
+        except Exception as failure:
+            log.exception("Reopening the current data after a failed manual restore failed")
+            self._session.close()
+            return self._terminate(failure, MANUAL_RESTORE_REOPEN_FAILED_MESSAGE)
+        return error.user_message
+
+    def _resume(self, connection: sqlite3.Connection) -> None:
+        from budget.services.facade import AppServices
+
+        self._window.replace_services(
+            AppServices.create(connection, self._clock, self._paths.backups)
+        )
+        self._window.setEnabled(True)
+
+    def _terminate(self, failure: BaseException, message: str) -> None:
+        self.failure = failure
+        self.terminated = True
+        self._show_error(message)
+        self._exit_application(EXIT_DATA_CORRUPTED)
+        return None
+
+
 def apply_theme() -> None:
     """Шрифти й таблиця стилів застосунку — один раз на процес."""
     from PySide6.QtWidgets import QApplication
@@ -551,6 +670,16 @@ def run_application(identity: ProductIdentity, paths: DataPaths, clock: Clock, a
         window = show_window_with_recovery(identity, session, clock, paths, restored, guard)
         if window is None:
             return EXIT_DATA_CORRUPTED
+        window.set_restore_handler(
+            ManualRestore(
+                session,
+                paths,
+                clock,
+                window,
+                exit_application=application.exit,
+                show_error=lambda text: _show_message(identity.name, text),
+            )
+        )
         with guard:
             return application.exec()
     finally:
