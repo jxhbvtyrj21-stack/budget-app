@@ -3,6 +3,7 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QGridLayout, QVBoxLayout
 
+from budget.domain.money import Money
 from budget.services.facade import AppServices
 from budget.ui.components.basic import Panel, amount_label, button, text_label
 from budget.ui.dialogs.base_minimum_dialog import BaseMinimumDialog
@@ -80,10 +81,16 @@ class OverviewPage(Page):
         current = self._services.months.current_month()
         incomes = self._services.incomes.list_for_month(current)
         active = [v for v in incomes if not v.income.archived and v.balance.is_positive]
+        archived = self._services.accumulations.list_archived()
+        archived_note = (
+            f"з них в архіві: {format_money(sum((v.balance for v in archived), Money.zero()))}"
+            if archived
+            else ""
+        )
         panels = [
             ("Доходи поточного місяця", funds.active_incomes, f"Активних доходів: {len(active)}"),
             ("Загальний нерозподілений залишок", funds.general_remainder, ""),
-            ("Накопичення", funds.accumulations, ""),
+            ("Накопичення", funds.accumulations, archived_note),
         ]
         pending = self._services.transitions.pending_long_gap()
         if pending is not None:

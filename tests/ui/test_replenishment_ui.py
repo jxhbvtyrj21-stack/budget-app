@@ -188,7 +188,7 @@ def test_month_section_menu_and_delete(qtbot, services, monkeypatch):
     assert page.replenishment_rows.count() == 1
     assert page.new_replenishment_button.isVisibleTo(page)
     # Поповнення не є звичайною витратою.
-    assert plain(page.expense_rows.itemAt(0).widget().text()) == "У цьому місяці немає витрат."
+    assert plain(page.expense_rows.itemAt(0).widget().text()) == "У цьому місяці ще немає витрат."
     row = page.replenishment_rows.itemAt(0).widget()
     assert menu_texts(row) == ["Редагувати", "Видалити"]
     confirm_deletion(monkeypatch)

@@ -51,6 +51,9 @@ def movement_secondary(movement: AccumulationMovement) -> str:
     )
 
 
+NO_RECORDS = "Фінансових записів немає."
+
+
 class MonthPage(Page):
     new_income_requested = Signal()
     changed = Signal()
@@ -89,8 +92,11 @@ class MonthPage(Page):
         self.read_only_banner = Notice("Минулий місяць — лише перегляд")
         self.read_only_banner.setObjectName("InfoBanner")
         self.body.addWidget(self.read_only_banner)
+        self.no_records = text_label(NO_RECORDS, "body", muted=True)
+        self.body.addWidget(self.no_records)
         self.summary = Panel()
         self.body.addWidget(self.summary)
+        self._record_panels: list[Panel] = []
         self.income_rows = self._section("Доходи")
         self.expense_rows = self._section("Витрати")
         self.replenishment_rows = self._section("Поповнення накопичень")
@@ -101,12 +107,19 @@ class MonthPage(Page):
 
     def _section(self, title: str) -> QVBoxLayout:
         panel = Panel()
+        self._record_panels.append(panel)
         panel.body.addWidget(text_label(title, "heading"))
         rows = QVBoxLayout()
         rows.setSpacing(0)
         panel.body.addLayout(rows)
         self.body.addWidget(panel)
         return rows
+
+    @staticmethod
+    def _empty_section(records: str, current: bool):
+        """Порожня секція (IA 12): у поточному місяці — «ще немає», у минулому — як було."""
+        word = "ще немає" if current else "немає"
+        return text_label(f"У цьому місяці {word} {records}.", "body", muted=True)
 
     # Навігація -------------------------------------------------------------------------
 
@@ -142,12 +155,23 @@ class MonthPage(Page):
         self._fill_summary(analysis, editable)
         self._fill_movements(analysis)
 
-        clear_layout(self.income_rows)
         incomes = self._services.incomes.list_for_month(self.month)
+        expenses = self._services.expenses.list_for_month(self.month)
+        replenishments = self._services.replenishments.list_for_month(self.month)
+        debts = self._services.debts
+        receipts = debts.list_for_month(self.month)
+        repayments = debts.repayments_for_month(self.month)
+        # Повністю порожній минулий місяць (IA 12): одне повідомлення замість секцій.
+        empty_past = not editable and not (
+            incomes or expenses or replenishments or receipts or repayments
+        )
+        self.no_records.setVisible(empty_past)
+        for panel in self._record_panels:
+            panel.setVisible(not empty_past)
+
+        clear_layout(self.income_rows)
         if not incomes:
-            self.income_rows.addWidget(
-                text_label("У цьому місяці немає доходів.", "body", muted=True)
-            )
+            self.income_rows.addWidget(self._empty_section("доходів", editable))
         for view in incomes:
             self.income_rows.addWidget(
                 ListRow(
@@ -159,11 +183,8 @@ class MonthPage(Page):
             )
 
         clear_layout(self.expense_rows)
-        expenses = self._services.expenses.list_for_month(self.month)
         if not expenses:
-            self.expense_rows.addWidget(
-                text_label("У цьому місяці немає витрат.", "body", muted=True)
-            )
+            self.expense_rows.addWidget(self._empty_section("витрат", editable))
         for view in expenses:
             actions = self._row_actions(view) if editable else None
             self.expense_rows.addWidget(
@@ -173,11 +194,8 @@ class MonthPage(Page):
             )
 
         clear_layout(self.replenishment_rows)
-        replenishments = self._services.replenishments.list_for_month(self.month)
         if not replenishments:
-            self.replenishment_rows.addWidget(
-                text_label("У цьому місяці немає поповнень накопичень.", "body", muted=True)
-            )
+            self.replenishment_rows.addWidget(self._empty_section("поповнень накопичень", editable))
         for view in replenishments:
             actions = self._replenishment_actions(view) if editable else None
             self.replenishment_rows.addWidget(
@@ -190,13 +208,8 @@ class MonthPage(Page):
             )
 
         clear_layout(self.debt_rows)
-        debts = self._services.debts
-        receipts = debts.list_for_month(self.month)
-        repayments = debts.repayments_for_month(self.month)
         if not receipts and not repayments:
-            self.debt_rows.addWidget(
-                text_label("У цьому місяці немає операцій боргів.", "body", muted=True)
-            )
+            self.debt_rows.addWidget(self._empty_section("операцій боргів", editable))
         for view in receipts:
             actions = self._loan_actions(view) if editable else None
             self.debt_rows.addWidget(

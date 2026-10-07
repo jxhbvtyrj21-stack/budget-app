@@ -1,16 +1,18 @@
 """Місяць: «Підсумки місяця» з базовим мінімумом і «Рух накопичень» (ADR 0020, ADR 0022)."""
 
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
 from PySide6.QtWidgets import QLabel
 
 from budget.app import open_application_database
-from budget.domain.calendar import FixedClock
+from budget.domain.calendar import CalendarMonth, FixedClock
 from budget.domain.models import ReplenishmentPart, SourceKind, SourceRef
 from budget.domain.money import Money
 from budget.platform.paths import DataPaths
 from budget.services.facade import AppServices
+from budget.services.month import MonthTransitionService
 from budget.services.setup import InitialAccumulation, InitialDebt, SetupDraft
 from budget.ui.dialogs.base_minimum_dialog import BaseMinimumDialog
 from budget.ui.main_window import MainWindow
@@ -188,3 +190,76 @@ def test_overview_open_month_link(qtbot, services):
     link.click()
     assert main.current_route() == "month"
     assert main.month.is_current()
+
+
+# Порожні секції й порожній минулий місяць (IA 12) -------------------------------------------
+
+
+def section_text(rows) -> str:
+    return plain(rows.itemAt(0).widget().text())
+
+
+def record_panels(page) -> list:
+    """Панелі секцій записів місяця (доходи, витрати, поповнення, борги, рух накопичень)."""
+    layouts = (
+        page.income_rows,
+        page.expense_rows,
+        page.replenishment_rows,
+        page.debt_rows,
+        page.movement_rows,
+    )
+    return [rows.parentWidget() for rows in layouts]
+
+
+@pytest.fixture
+def history(tmp_path):
+    """Налаштування у вересні з одним доходом; зараз — листопад, жовтень без записів."""
+    clock = FixedClock(datetime(2026, 9, 15, 9, 0, tzinfo=UTC))
+    connection = open_application_database(DataPaths(tmp_path / "history"), clock)
+    services = AppServices.create(connection, clock)
+    services.setup.complete(SetupDraft(general_remainder=Money(100_000)))
+    services.incomes.create("Вереснева зарплата", None, Money(40_000))
+    clock.set(datetime(2026, 11, 3, 9, 0, tzinfo=UTC))
+    yield services
+    connection.close()
+
+
+def test_current_month_empty_sections_say_not_yet(qtbot, history):
+    page = window(qtbot, history).month
+    assert page.is_current() and page.no_records.isHidden()
+    assert section_text(page.income_rows) == "У цьому місяці ще немає доходів."
+    assert section_text(page.expense_rows) == "У цьому місяці ще немає витрат."
+    assert section_text(page.replenishment_rows) == "У цьому місяці ще немає поповнень накопичень."
+    assert section_text(page.debt_rows) == "У цьому місяці ще немає операцій боргів."
+
+
+def test_fully_empty_past_month_shows_no_records(qtbot, history, monkeypatch):
+    connects, transitions = [], []
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: connects.append(a))
+    monkeypatch.setattr(
+        MonthTransitionService, "run_on_startup", lambda self: transitions.append(self)
+    )
+    page = window(qtbot, history).month
+    page.show_month(CalendarMonth(2026, 10))
+    assert not page.is_current()
+    assert not page.no_records.isHidden() and page.no_records.text() == "Фінансових записів немає."
+    assert not page.read_only_banner.isHidden()  # банер «лише перегляд» лишається
+    assert all(panel.isHidden() for panel in record_panels(page))
+    assert not page.new_expense_button.isVisibleTo(page)
+    assert not page.new_income_button.isVisibleTo(page)
+    assert not page.new_replenishment_button.isVisibleTo(page)
+    assert connects == [] and transitions == []
+
+
+def test_past_month_with_records_keeps_existing_sections(qtbot, history):
+    page = window(qtbot, history).month
+    page.show_month(CalendarMonth(2026, 9))
+    assert page.no_records.isHidden() and not page.read_only_banner.isHidden()
+    assert not any(panel.isHidden() for panel in record_panels(page))
+    assert page.income_rows.count() == 1
+    # Частково заповнений минулий місяць — без змін: «немає», без «ще».
+    assert section_text(page.expense_rows) == "У цьому місяці немає витрат."
+    # Повернення до поточного місяця знову показує секції.
+    page.show_month(CalendarMonth(2026, 11))
+    assert page.no_records.isHidden()
+    assert not any(panel.isHidden() for panel in record_panels(page))

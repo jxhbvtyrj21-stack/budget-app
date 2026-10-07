@@ -1,5 +1,6 @@
 """Екран «Накопичення»: перелік, архів, картка, дозволені дії й форма (ADR 0021, 6)."""
 
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -12,8 +13,10 @@ from budget.domain.models import AccumulationStatus, SourceKind, SourceRef
 from budget.domain.money import Money
 from budget.platform.paths import DataPaths
 from budget.services.facade import AppServices
+from budget.services.month import MonthTransitionService
 from budget.services.setup import InitialAccumulation, SetupDraft
 from budget.ui.dialogs.accumulation_dialog import AccumulationDialog
+from budget.ui.formatting import format_money
 from budget.ui.main_window import MAIN_ROUTES, MainWindow
 from budget.ui.screens.accumulations import AccumulationsPage
 
@@ -224,3 +227,34 @@ def test_card_history_shows_initial_balance_and_expenses(page, services):
     texts = {label.text() for label in page.detail_page.findChildren(QLabel)}
     assert {"Початковий баланс (первинне налаштування)", "Жовтень 2026"} <= texts
     assert "Стовпчики" in texts and "Витрата з накопичення" in texts
+
+
+# «Огляд»: «з них в архіві: X» (IA 4.1, 12) -------------------------------------------------
+
+
+def overview_texts(window) -> list[str]:
+    return [plain(label.text()) for label in window.overview.findChildren(QLabel)]
+
+
+def test_overview_shows_archived_share_of_accumulations(qtbot, services, monkeypatch):
+    make(services, "Стара ціль", CLOSED, archived=True)
+    archived = services.accumulations.list_archived()
+    expected = sum((v.balance for v in archived), Money.zero())
+    connects, transitions = [], []
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: connects.append(a))
+    monkeypatch.setattr(
+        MonthTransitionService, "run_on_startup", lambda self: transitions.append(self)
+    )
+    window = MainWindow("Budget", services)
+    qtbot.addWidget(window)
+    window.refresh()
+    assert f"з них в архіві: {plain(format_money(expected))}" in overview_texts(window)
+    # Лише показ наявних даних: без нових з'єднань і без переходу між місяцями.
+    assert connects == [] and transitions == []
+
+
+def test_overview_without_archived_accumulations_has_no_archive_line(qtbot, services):
+    assert services.accumulations.list_archived() == []
+    window = MainWindow("Budget", services)
+    qtbot.addWidget(window)
+    assert not [t for t in overview_texts(window) if t.startswith("з них в архіві")]

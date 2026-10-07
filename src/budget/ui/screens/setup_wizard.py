@@ -38,6 +38,7 @@ STEP_TITLES = {
     SetupStep.DEBTS: "Борги",
     SetupStep.REVIEW: "Перевірка",
 }
+CAN_SKIP = "Можна пропустити."  # кроки 3–4 без записів (IA 12)
 
 
 class SetupWizardPage(Page):
@@ -248,7 +249,7 @@ class SetupWizardPage(Page):
         try:
             self._setup.complete(self.draft)
         except BudgetError as error:
-            QMessageBox.warning(self, "Первинне налаштування", error.user_message)
+            QMessageBox.warning(self, "Помилка", error.user_message)
             return
         self.completed.emit()
 
@@ -288,6 +289,8 @@ class SetupWizardPage(Page):
 
     def _render_lists(self) -> None:
         clear_layout(self.accumulation_list)
+        if not self.draft.accumulations:
+            self.accumulation_list.addWidget(text_label(CAN_SKIP, "body", muted=True))
         for index, item in enumerate(self.draft.accumulations):
             target = f" · ціль {format_money(item.target)}" if item.target is not None else ""
             self.accumulation_list.addWidget(
@@ -297,6 +300,8 @@ class SetupWizardPage(Page):
                 )
             )
         clear_layout(self.debt_list)
+        if not self.draft.debts:
+            self.debt_list.addWidget(text_label(CAN_SKIP, "body", muted=True))
         for index, item in enumerate(self.draft.debts):
             self.debt_list.addWidget(
                 self._removable(

@@ -3,15 +3,16 @@
 from datetime import UTC, datetime
 
 import pytest
-from PySide6.QtWidgets import QDialog, QMessageBox
+from PySide6.QtWidgets import QDialog, QLabel, QMessageBox
 
 from budget.app import open_application_database
 from budget.domain.calendar import FixedClock
 from budget.domain.money import Money
+from budget.errors import BudgetError
 from budget.platform.paths import DataPaths
 from budget.services.facade import AppServices
 from budget.services.month import LongGapChoice
-from budget.services.setup import SetupDraft
+from budget.services.setup import InitialSetupService, SetupDraft
 from budget.ui.dialogs.income_dialog import IncomeDialog
 from budget.ui.dialogs.long_gap_dialog import LongGapDialog
 from budget.ui.main_window import MainWindow
@@ -152,3 +153,52 @@ def test_refresh_leaves_no_detached_panels(qtbot, connection, clock):
         window.refresh()
     # Підсумок + три панелі складу; старі панелі від'єднано одразу.
     assert len(window.overview.findChildren(Panel)) == 4
+
+
+# Майстер: «Можна пропустити» і «Помилка» (IA 11, 12) ----------------------------------------
+
+
+def list_texts(layout) -> list[str]:
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+    return [text(w) for w in widgets if isinstance(w, QLabel)]
+
+
+def test_empty_wizard_lists_can_be_skipped(qtbot, connection, clock):
+    window = MainWindow("Budget", AppServices.create(connection, clock))
+    qtbot.addWidget(window)
+    wizard = window.wizard
+    wizard.next_button.click()  # → наявні кошти
+    wizard.next_button.click()  # → накопичення
+    assert list_texts(wizard.accumulation_list) == ["Можна пропустити."]
+    wizard.acc_name.field.setText("Подорож")
+    wizard.add_accumulation_button.click()
+    assert "Можна пропустити." not in list_texts(wizard.accumulation_list)
+    wizard.next_button.click()  # → борги
+    assert list_texts(wizard.debt_list) == ["Можна пропустити."]
+    wizard.debt_name.field.setText("Позика")
+    wizard.debt_balance.field.setText("3 000")
+    wizard.add_debt_button.click()
+    assert "Можна пропустити." not in list_texts(wizard.debt_list)
+
+
+def test_failed_finish_shows_error_and_keeps_wizard(qtbot, connection, clock, monkeypatch):
+    window = MainWindow("Budget", AppServices.create(connection, clock))
+    qtbot.addWidget(window)
+    wizard = window.wizard
+    wizard.next_button.click()
+    wizard.remainder_input.setText("700")
+    for _ in range(3):
+        wizard.next_button.click()  # → перевірка
+    shown = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda parent, title, message: shown.append((title, message))
+    )
+
+    def failing(service, draft):
+        raise BudgetError("Не вдалося завершити налаштування.")
+
+    monkeypatch.setattr(InitialSetupService, "complete", failing)
+    draft = wizard.draft
+    wizard.finish_button.click()
+    assert shown == [("Помилка", "Не вдалося завершити налаштування.")]
+    assert window.wizard is wizard and wizard.draft == draft  # дані майстра не втрачено
