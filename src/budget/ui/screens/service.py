@@ -1,23 +1,52 @@
 """Сервіс (ui-information-architecture.md, розділ 8; design-system.md, 6.5).
 
 «Резервні копії»: таблиця справних копій від найновішої (дата й час створення,
-вид, розмір). Перелік і перевірку копій виконує ``BackupService``; екран лише
-показує результат.
+вид, розмір) і «Створити резервну копію» — копія на вимогу (DS-5). Перелік, перевірку
+й створення копій виконує ``BackupService``; екран лише показує результат. Невдача —
+повідомлення «Помилка» з причиною (IA 12); пошкодження бази, знайдене перевіркою
+перед копією, показується так само, без запуску відновлення. «Відновити з копії» поки
+недоступна: відновлення під час звичайної роботи — окремий блок.
+
+«Про програму»: назва продукту (з ``product.toml`` через головне вікно) і версія з
+метаданих встановленого пакета.
 """
 
-from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
+import logging
+from importlib.metadata import version
 
-from budget.services.backup import BackupService, RestoreCandidate
-from budget.ui.components.basic import Panel, text_label
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QHBoxLayout,
+    QHeaderView,
+    QTableWidget,
+    QTableWidgetItem,
+)
+
+from budget.errors import BudgetError
+from budget.services.backup import BackupKind, BackupService, RestoreCandidate
+from budget.ui.components.basic import Panel, button, text_label
+from budget.ui.components.forms import Notice
 from budget.ui.formatting import format_backup_kind, format_moment, format_size
+from budget.ui.messages import user_text
 from budget.ui.screens.page import Page
+
+log = logging.getLogger(__name__)
 
 BACKUP_COLUMNS = ("Дата й час створення", "Вид", "Розмір")
 EMPTY_BACKUPS = "Резервних копій ще немає"
+CREATE_BACKUP = "Створити резервну копію"
+RESTORE_BACKUP = "Відновити з копії"
+BACKUP_FAILED = "Резервну копію не створено."
+PACKAGE = "budget"  # назва дистрибутива в pyproject.toml
+
+
+def application_version() -> str:
+    """Версія застосунку з метаданих пакета (``pyproject.toml``), без копії в коді."""
+    return version(PACKAGE)
 
 
 class ServicePage(Page):
-    def __init__(self, backups: BackupService) -> None:
+    def __init__(self, backups: BackupService, product_name: str) -> None:
         super().__init__("Сервіс")
         self._backups = backups
         self.candidates: list[RestoreCandidate] = []
@@ -39,7 +68,27 @@ class ServicePage(Page):
         panel.body.addWidget(self.table)
         self.empty = text_label(EMPTY_BACKUPS, "body", muted=True)
         panel.body.addWidget(self.empty)
+        self.failure = Notice("Помилка", error=True)
+        self.failure.hide()
+        panel.body.addWidget(self.failure)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        self.restore_button = button(RESTORE_BACKUP)
+        self.restore_button.setEnabled(False)  # відновлення під час роботи — окремий блок
+        self.create_button = button(CREATE_BACKUP, "primary")
+        self.create_button.clicked.connect(self.create_backup)
+        actions.addWidget(self.restore_button)
+        actions.addWidget(self.create_button)
+        panel.body.addLayout(actions)
         self.body.addWidget(panel)
+
+        about = Panel()
+        about.body.addWidget(text_label("Про програму", "heading"))
+        self.product_label = text_label(product_name, "body-strong")
+        self.version_label = text_label(f"Версія {application_version()}", "body", muted=True)
+        about.body.addWidget(self.product_label)
+        about.body.addWidget(self.version_label)
+        self.body.addWidget(about)
         self.body.addStretch(1)
         self.refresh()
 
@@ -58,3 +107,15 @@ class ServicePage(Page):
         has_rows = bool(self.candidates)
         self.table.setVisible(has_rows)
         self.empty.setVisible(not has_rows)
+
+    def create_backup(self) -> None:
+        """Копія на вимогу (DS-5) на з'єднанні сесії; потім оновлений перелік."""
+        try:
+            self._backups.create_backup(BackupKind.ON_DEMAND)
+        except BudgetError as error:
+            log.exception("On-demand backup failed")
+            self.failure.set_text(f"{BACKUP_FAILED} {user_text(error)}")
+            self.failure.show()
+            return
+        self.failure.hide()
+        self.refresh()

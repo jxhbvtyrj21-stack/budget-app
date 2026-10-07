@@ -124,7 +124,7 @@ class MainWindow(QMainWindow):
         # «Сервіс» потребує теки резервних копій; без неї (лише в тестах) — заглушка.
         self.service = None
         if self._services.backups is not None:
-            self.service = ServicePage(self._services.backups)
+            self.service = ServicePage(self._services.backups, self.windowTitle())
             self._add_route("service", self.service)
         for route, title in FOOTER_ROUTES:
             if route not in self._routes:
