@@ -6,7 +6,7 @@ from pathlib import Path
 from budget.domain.calendar import Clock
 from budget.errors import DatabaseCorruptedError
 from budget.services.backup import BackupKind, BackupService
-from budget.storage.database import open_database
+from budget.storage.database import close_without_checkpoint, open_database
 from budget.storage.integrity import quick_check
 from budget.storage.migrations import migrate, schema_version
 
@@ -28,6 +28,9 @@ def prepare_database(database_path: Path, backups_dir: Path, clock: Clock) -> sq
                 backups.create_backup(BackupKind.BEFORE_MIGRATION, version)
 
         migrate(connection, before_migration=backup_before)
+    except DatabaseCorruptedError:
+        close_without_checkpoint(connection)
+        raise
     except BaseException:
         connection.close()
         raise

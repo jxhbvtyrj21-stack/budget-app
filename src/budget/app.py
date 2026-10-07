@@ -21,6 +21,7 @@ from budget.services.backup import (
     RestoreError,
 )
 from budget.services.startup import prepare_database
+from budget.storage.database import close_without_checkpoint
 from budget.storage.integrity import corruption_code, quick_check
 
 log = logging.getLogger(__name__)
@@ -73,6 +74,9 @@ def open_application_database(paths: DataPaths, clock: Clock) -> sqlite3.Connect
     connection = prepare_database(paths.database, paths.backups, clock)
     try:
         BackupService(connection, paths.backups, clock).run_automatic()
+    except DatabaseCorruptedError:
+        close_without_checkpoint(connection)
+        raise
     except BaseException:
         connection.close()
         raise
@@ -118,6 +122,13 @@ class ApplicationSession:
         connection, self._connection = self._connection, None
         if connection is not None:
             connection.close()
+
+    def close_after_corruption(self) -> None:
+        """Закриває з'єднання з пошкодженою базою без checkpoint WAL
+        (``close_without_checkpoint``); повторний виклик нічого не робить."""
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            close_without_checkpoint(connection)
 
     def _require_closed(self) -> None:
         if self._connection is not None:
@@ -222,9 +233,10 @@ RESTORE_INCOMPLETE_MESSAGE = (
 class RuntimeRecoveryFlow:
     """Точка входу відновлення під час роботи (``on_corruption`` для C3; Blocks C5.1–C5.2).
 
-    Порядок: вікна неактивні → ``session.close()`` (жодного з'єднання з пошкодженою
-    базою) → карантин ``.db``/``-wal``/``-shm`` → діалог «Дані пошкоджено» з назвою
-    збереженого файлу й перевіреними копіями. Скасування — ``exit_application``
+    Порядок: вікна неактивні → ``session.close_after_corruption()`` (жодного з'єднання
+    з пошкодженою базою; без checkpoint WAL у пошкоджений файл) → карантин
+    ``.db``/``-wal``/``-shm`` → діалог «Дані пошкоджено» з назвою збереженого файлу
+    й перевіреними копіями. Скасування — ``exit_application``
     з ``EXIT_DATA_CORRUPTED``: бази вже немає, працювати далі нема з чим. Невдалий
     карантин — повідомлення й той самий вихід; діалог не відкривається.
 
@@ -268,7 +280,7 @@ class RuntimeRecoveryFlow:
         from budget.ui.dialogs.recovery_dialog import RecoveryDialog
 
         _suspend_ui_for_recovery(error)
-        self._session.close()
+        self._session.close_after_corruption()
         try:
             quarantined = self._recovery.quarantine_corrupted()
         except StorageError as failure:
@@ -536,7 +548,12 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
         with guard:
             return application.exec()
     finally:
-        session.close()
+        # Пошкодження, по якому відновлення не відбулося (напр., до циклу подій), —
+        # закриття без checkpoint; після успішного відновлення guard знову не «detected».
+        if guard.detected:
+            session.close_after_corruption()
+        else:
+            session.close()
         lock.unlock()
 
 

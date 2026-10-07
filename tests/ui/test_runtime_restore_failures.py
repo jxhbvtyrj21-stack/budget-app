@@ -492,18 +492,21 @@ def test_real_wal_lifecycle_close_quarantine_restore(
     qtbot, running, confirmed, attempts, previous_hook, connections
 ):
     app = running
-    # Справжній стан WAL: закриття не переносить WAL в основний файл, тож лишаються всі три.
-    app.old_connection.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+    # Справжній стан WAL у звичайній (production) конфігурації: зафіксовані кадри лише у WAL.
     app.old_connection.execute("UPDATE general_remainder SET balance = 4242")
     assert all(p.exists() for p in database_files(app.paths.database))
     wal_before = database_files(app.paths.database)[1].read_bytes()
     assert wal_before  # у WAL справді є кадри
+    c52.corrupt_pages(app.paths.database)  # той самий детермінований вміст, що й далі
+    db_before = app.paths.database.read_bytes()
     with app.guard:
         corrupt_and_recover(qtbot, app, c52.choose(0), [], previous_hook)
     assert app.exits == [] and previous_hook == [] and app.window.isEnabled()
     (kept,) = [n for n in quarantined(app) if not n.endswith(("-wal", "-shm"))]
     kept_files = database_files(app.paths.root / kept)
     assert all(p.exists() for p in kept_files)  # .db, -wal, -shm перенесено разом
+    # Закриття без checkpoint: пошкоджений файл не змінено, кадри WAL не перенесено в нього.
+    assert kept_files[0].read_bytes() == db_before
     assert kept_files[1].read_bytes() == wal_before
     # Відновлена база: саме стан копії — старий WAL до неї не підмішався.
     (returned,) = values(attempts, "returned")
@@ -515,16 +518,19 @@ def test_real_wal_lifecycle_close_quarantine_restore(
 
 @pytest.mark.skipif(sys.platform != "win32", reason="блокування відкритого файлу — лише Windows")
 def test_windows_open_session_blocks_rename_and_close_releases_it(running):
-    """У Windows відкрита база не перейменовується; після ``session.close()`` — так."""
+    """У Windows відкрита база не перейменовується; після закриття без checkpoint
+    (``session.close_after_corruption()``) усі три файли вільні й не змінені."""
     app = running
-    app.old_connection.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
     app.old_connection.execute("UPDATE general_remainder SET balance = 4242")
+    c52.corrupt_pages(app.paths.database)
+    before = [p.read_bytes() for p in database_files(app.paths.database)[:2]]
     target = app.paths.database.with_name("budget.db.windows-check")
     with pytest.raises(PermissionError):
         app.paths.database.rename(target)
-    app.session.close()
+    app.session.close_after_corruption()
     present = [p for p in database_files(app.paths.database) if p.exists()]
     assert len(present) == 3  # .db, -wal, -shm після закриття лишилися
+    assert [p.read_bytes() for p in present[:2]] == before  # жодного checkpoint
     for path in present:
         path.rename(path.with_name(path.name.replace("budget.db", "budget.db.windows-check")))
     assert not any(p.exists() for p in database_files(app.paths.database))

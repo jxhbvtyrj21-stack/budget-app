@@ -187,7 +187,7 @@ def test_session_is_closed_before_quarantine_and_dialog_comes_last(
     paths, session, connection, window, forbidden, _ = running
     corrupt_pages(paths.database)
     events = []
-    original_close = ApplicationSession.close
+    original_close = ApplicationSession.close_after_corruption
     original_quarantine = RecoveryService.quarantine_corrupted
 
     def close(self):
@@ -198,7 +198,7 @@ def test_session_is_closed_before_quarantine_and_dialog_comes_last(
         events.append(("quarantine", session.is_open, paths.database.exists()))
         return original_quarantine(self)
 
-    monkeypatch.setattr(ApplicationSession, "close", close)
+    monkeypatch.setattr(ApplicationSession, "close_after_corruption", close)
     monkeypatch.setattr(RecoveryService, "quarantine_corrupted", quarantine)
 
     def note_dialog(dialog):
@@ -219,17 +219,22 @@ def test_session_is_closed_before_quarantine_and_dialog_comes_last(
 
 def test_quarantine_moves_db_wal_and_shm_together(qtbot, running, monkeypatch, previous_hook):
     paths, session, connection, window, forbidden, _ = running
-    # Справжній стан WAL: закриття не переносить WAL в основний файл, тож лишаються всі три.
-    connection.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+    # Справжній стан WAL у звичайній (production) конфігурації: зафіксовані кадри лише у WAL.
     connection.execute("UPDATE general_remainder SET balance = 4242")
     corrupt_pages(paths.database)
-    wal_before, dialog_seen = [], []
+    db_before = paths.database.read_bytes()
+    wal_before = database_files(paths.database)[1].read_bytes()
+    assert wal_before
+    at_quarantine = {}
     original_quarantine = RecoveryService.quarantine_corrupted
 
     def capture_wal(self):
-        dialog_seen.append(all(p.exists() for p in database_files(paths.database)))
-        wal_before.append(database_files(paths.database)[1].read_bytes())
+        at_quarantine["all_present"] = all(p.exists() for p in database_files(paths.database))
+        at_quarantine["db"] = paths.database.read_bytes()
+        at_quarantine["wal"] = database_files(paths.database)[1].read_bytes()
         return original_quarantine(self)
+
+    dialog_seen = []
 
     def remember_and_cancel(dialog):
         dialog_seen.append(dialog_texts(dialog))
@@ -245,11 +250,14 @@ def test_quarantine_moves_db_wal_and_shm_together(qtbot, running, monkeypatch, p
         for p in paths.root.iterdir()
         if ".corrupted-" in p.name and not p.name.endswith(("-wal", "-shm"))
     ]
-    assert dialog_seen[0] is True  # у момент карантину існували всі три файли
+    # Закриття не перенесло кадри WAL у пошкоджений файл і не прибрало -wal/-shm.
+    assert at_quarantine["all_present"] is True
+    assert at_quarantine["db"] == db_before and at_quarantine["wal"] == wal_before
     assert not any(p.exists() for p in database_files(paths.database))
     assert all(p.exists() for p in database_files(kept))
-    assert database_files(kept)[1].read_bytes() == wal_before[0]  # WAL не відірвано
-    assert RUNTIME_EXPLANATION.format(name=kept.name) in dialog_seen[1]
+    assert kept.read_bytes() == db_before  # у карантині — саме той пошкоджений файл
+    assert database_files(kept)[1].read_bytes() == wal_before  # WAL не відірвано
+    assert RUNTIME_EXPLANATION.format(name=kept.name) in dialog_seen[0]
     assert forbidden == []
 
 
