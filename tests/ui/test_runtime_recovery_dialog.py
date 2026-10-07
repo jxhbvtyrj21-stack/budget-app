@@ -66,7 +66,7 @@ def running(tmp_path, qtbot, monkeypatch):
     monkeypatch.setattr(MainWindow, "replace_services", lambda *a: forbidden.append("replace"))
     monkeypatch.setattr(ApplicationSession, "open", lambda *a: forbidden.append("open"))
     monkeypatch.setattr(ApplicationSession, "adopt", lambda *a: forbidden.append("adopt"))
-    yield paths, session, connection, window, forbidden
+    yield paths, session, connection, window, forbidden, services
     window.close()
     session.close()
 
@@ -98,6 +98,23 @@ def confirm(monkeypatch, confirmed: bool) -> None:
     )
 
 
+def visible_recovery_dialogs() -> list[RecoveryDialog]:
+    """Видимі діалоги відновлення (без діалогів попередніх тестів, що чекають видалення)."""
+    return [
+        widget
+        for widget in QApplication.topLevelWidgets()
+        if isinstance(widget, RecoveryDialog) and widget.isVisible()
+    ]
+
+
+def drain_qt_events(qtbot) -> None:
+    """Обробити всі вже заплановані події Qt: сигнальний таймер з нульовою затримкою
+    спрацьовує після таймерів, запланованих раніше, — очікування умови, а не часу."""
+    reached = []
+    QTimer.singleShot(0, lambda: reached.append(True))
+    qtbot.waitUntil(lambda: bool(reached), timeout=5000)
+
+
 def when_dialog_opens(action, seen: list) -> None:
     """Дочекатися справжнього модального діалогу в циклі подій і діяти як користувач."""
 
@@ -127,7 +144,7 @@ def run_runtime_recovery(qtbot, paths, window, action, choices, seen):
 def test_runtime_corruption_opens_dialog_and_returns_the_selected_candidate(
     qtbot, running, monkeypatch, previous_hook
 ):
-    paths, session, connection, window, forbidden = running
+    paths, session, connection, window, forbidden, _ = running
     before = sorted(p.name for p in paths.backups.iterdir())
     corrupt_pages(paths.database)
     confirm(monkeypatch, True)
@@ -166,7 +183,7 @@ def test_runtime_corruption_opens_dialog_and_returns_the_selected_candidate(
 
 
 def test_cancel_is_a_controlled_result_and_does_not_resume_work(qtbot, running, previous_hook):
-    paths, session, connection, window, forbidden = running
+    paths, session, connection, window, forbidden, _ = running
     corrupt_pages(paths.database)
     choices, seen = [], []
     run_runtime_recovery(
@@ -179,7 +196,7 @@ def test_cancel_is_a_controlled_result_and_does_not_resume_work(qtbot, running, 
 
 
 def test_declined_confirmation_keeps_the_dialog_open(qtbot, running, monkeypatch, previous_hook):
-    paths, _, _, window, forbidden = running
+    paths, _, _, window, forbidden, _ = running
     corrupt_pages(paths.database)
     confirm(monkeypatch, False)
     states = []
@@ -195,45 +212,46 @@ def test_declined_confirmation_keeps_the_dialog_open(qtbot, running, monkeypatch
 
 
 def test_repeated_corruption_while_dialog_is_open_opens_no_second_dialog(
-    qtbot, running, previous_hook, monkeypatch
+    qtbot, running, previous_hook
 ):
-    paths, _, _, window, forbidden = running
+    paths, _, _, window, forbidden, _ = running
     corrupt_pages(paths.database)
-    opened = []
-    original_init = RecoveryDialog.__init__
-
-    def counting_init(self, *args, **kwargs):
-        opened.append(self)
-        original_init(self, *args, **kwargs)
+    visible_during = []
 
     def more_corruption_then_cancel(dialog):
         for _ in range(3):
             error = sqlite3.DatabaseError("database disk image is malformed")
             error.sqlite_errorcode = sqlite3.SQLITE_CORRUPT
             sys.excepthook(type(error), error, None)
-        QTimer.singleShot(50, dialog.close_button.click)
+
+        def check_then_cancel():
+            # Усе, що повторні пошкодження могли запланувати, уже оброблено цим моментом.
+            visible_during.append(len(visible_recovery_dialogs()))
+            dialog.close_button.click()
+
+        QTimer.singleShot(0, check_then_cancel)
 
     choices, seen = [], []
-    monkeypatch.setattr(RecoveryDialog, "__init__", counting_init)
     run_runtime_recovery(qtbot, paths, window, more_corruption_then_cancel, choices, seen)
-    qtbot.wait(100)
-    assert len(opened) == 1 and len(choices) == 1 and forbidden == []
+    drain_qt_events(qtbot)
+    assert visible_during == [1]  # рівно один видимий діалог під час повторних пошкоджень
+    assert len(seen) == 1 and len(choices) == 1 and forbidden == []
+    assert visible_recovery_dialogs() == []  # і жодного після скасування
     assert len([w for w in QApplication.topLevelWidgets() if isinstance(w, MainWindow)]) == 1
 
 
 def test_ordinary_error_opens_no_recovery_dialog(qtbot, running, previous_hook):
-    _, _, _, window, forbidden = running
+    _, _, _, window, forbidden, _ = running
     choices = []
     flow = RuntimeRecoveryFlow(lambda: [], choices.append)
     with RuntimeCorruptionGuard(flow):
         error = sqlite3.OperationalError("database is locked")
         error.sqlite_errorcode = sqlite3.SQLITE_BUSY
         QTimer.singleShot(0, lambda: sys.excepthook(type(error), error, None))
-        qtbot.wait(100)
-    assert choices == [] and previous_hook and window.isEnabled() and forbidden == []
-    assert not [
-        w for w in QApplication.topLevelWidgets() if isinstance(w, RecoveryDialog) and w.isVisible()
-    ]
+        drain_qt_events(qtbot)
+    assert choices == [] and previous_hook == [error]
+    assert window.isEnabled() and forbidden == []
+    assert visible_recovery_dialogs() == []
 
 
 def test_startup_dialog_text_is_unchanged(qtbot):
@@ -246,8 +264,8 @@ def test_startup_dialog_text_is_unchanged(qtbot):
 
 def test_runtime_listing_matches_backup_service_candidates(running):
     """Діалог під час роботи бере той самий перевірений перелік, що й BackupService."""
-    paths, _, _, window, _ = running
+    paths, _, _, _, _, services = running
     runtime = RecoveryService(paths.database, paths.backups, CLOCK).candidates()
     assert [c.backup.path for c in runtime] == [
-        c.backup.path for c in window._services.backups.candidates()
+        c.backup.path for c in services.backups.candidates()
     ]
