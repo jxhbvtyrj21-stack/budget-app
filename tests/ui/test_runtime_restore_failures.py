@@ -376,6 +376,15 @@ def test_failure_after_restore_is_terminal_and_closes_the_connection(
 # Відкат (C6) ---------------------------------------------------------------------------------
 
 
+def test_rollback_failed_message_makes_no_claim_about_backups():
+    """Невдала спроба може додати копії (перед міграцією, автоматичні) і запустити ротацію,
+    тож незмінність резервних копій не є інваріантом і не стверджується."""
+    for claim in ("Резервні копії", "резервні копії", "не змінено", "без змін"):
+        assert claim not in ROLLBACK_FAILED_MESSAGE, claim
+    assert "Не вдалося відновити дані з вибраної копії" in ROLLBACK_FAILED_MESSAGE
+    assert "повернути не вдалося" in ROLLBACK_FAILED_MESSAGE
+
+
 def test_rollback_failure_is_terminal_and_reported_honestly(
     qtbot, running, confirmed, attempts, previous_hook, connections, rearms, monkeypatch, caplog
 ):
@@ -389,13 +398,21 @@ def test_rollback_failure_is_terminal_and_reported_honestly(
         lambda: PermissionError(errno.EACCES, "відновлена база зайнята"),
         when=lambda path: path == app.paths.database,
     )
+    backups_before = sorted(p.name for p in app.paths.backups.iterdir())
     with caplog.at_level(logging.INFO), app.guard:
         corrupt_and_recover(qtbot, app, c52.choose(0), [], previous_hook)
     (error,) = values(attempts, "raised")
-    # Повідомлення: лише чесне «не вдалося повернути», без «залишився без змін».
+    # Невдала спроба справді змінила набір копій: до невдалої перевірки відновлення
+    # встигло створити автоматичні копії поточного періоду (жовтень).
+    backups_after = sorted(p.name for p in app.paths.backups.iterdir())
+    added = sorted(set(backups_after) - set(backups_before))
+    assert added and all(name.startswith("budget-20261006-") for name in added)
+    # Тому повідомлення — лише гарантовані факти: ні «залишився без змін», ні
+    # «резервні копії не змінено».
     assert error.user_message == ROLLBACK_FAILED_MESSAGE
     assert app.errors == [f"{ROLLBACK_FAILED_MESSAGE} {APPLICATION_WILL_CLOSE}"]
-    assert UNCHANGED not in app.errors[0]
+    for claim in (UNCHANGED, "не змінено", "Резервні копії"):
+        assert claim not in app.errors[0], claim
     # Первинна причина — невдала перевірка; вторинна — невдалий відкат; обидві збережені.
     assert isinstance(error.__cause__, RestoreError)
     assert "integrity_check не пройдено" in error.__cause__.detail
