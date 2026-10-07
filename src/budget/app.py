@@ -515,13 +515,19 @@ def show_main_window(
 def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
     from PySide6.QtWidgets import QApplication
 
-    from budget.platform.single_instance import acquire_single_instance
     from budget.platform.windows import set_app_user_model_id
 
     set_app_user_model_id(identity.app_user_model_id)
     application = QApplication(sys.argv)
     application.setApplicationName(identity.name)
     application.setOrganizationName(identity.publisher)
+    return run_application(identity, paths, clock, application)
+
+
+def run_application(identity: ProductIdentity, paths: DataPaths, clock: Clock, application) -> int:
+    """Життєвий цикл застосунку в уже створеному ``QApplication``: блокування одного
+    екземпляра, сесія бази, головне вікно, цикл подій і завершення."""
+    from budget.platform.single_instance import acquire_single_instance
 
     lock = acquire_single_instance(paths.lock)
     if lock is None:
@@ -542,7 +548,7 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
     )
     try:
         # Посилання тримає вікно живим до кінця циклу подій.
-        window = show_window_or_report(identity, session, clock, paths, restored, guard)
+        window = show_window_with_recovery(identity, session, clock, paths, restored, guard)
         if window is None:
             return EXIT_DATA_CORRUPTED
         with guard:
@@ -566,7 +572,7 @@ def show_window_or_report(
     guard: RuntimeCorruptionGuard,
 ):
     """Показує головне вікно. Пошкодження бази до запуску циклу подій — ``None``:
-    ``guard`` фіксує його (контрольований вихід; відновлення — C5). Інші помилки
+    ``guard`` фіксує його (відновлення — ``show_window_with_recovery``). Інші помилки
     SQLite не перехоплюються."""
     try:
         return show_main_window(
@@ -576,6 +582,42 @@ def show_window_or_report(
         if not guard.handle_runtime_corruption(exc, schedule=False):
             raise
         return None
+
+
+def show_window_with_recovery(
+    identity: ProductIdentity,
+    session: ApplicationSession,
+    clock: Clock,
+    paths: DataPaths,
+    restored: bool,
+    guard: RuntimeCorruptionGuard,
+):
+    """Головне вікно до запуску циклу подій.
+
+    Пошкодження, виявлене тут, іде тим самим шляхом, що й пошкодження під час запуску
+    (``_recover_corrupted_database``, Block B): закриття без checkpoint, карантин,
+    діалог «Дані пошкоджено», відновлення вибраної копії. Сесія бере саме повернуте
+    з'єднання, ``guard`` знову готовий, і вікно будується зі стану копії — без
+    переходу між місяцями й діалогу тривалої перерви. Цикл подій ще не працює, тож
+    жодного ``QTimer`` і відновлення під час роботи тут немає. ``None`` — користувач
+    закрив застосунок або карантин не вдався.
+    """
+    while True:
+        window = show_window_or_report(identity, session, clock, paths, restored, guard)
+        if window is not None:
+            return window
+        session.close_after_corruption()
+        connection = _recover_corrupted_database(
+            identity,
+            paths,
+            clock,
+            DatabaseCorruptedError(detail="Пошкодження виявлено до запуску циклу подій"),
+        )
+        if connection is None:
+            return None
+        session.adopt(connection)
+        guard.rearm()
+        restored = True
 
 
 def start_session(
