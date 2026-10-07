@@ -1,7 +1,7 @@
 """Діалог «Дані пошкоджено» (DS-6; ui-information-architecture.md, 10.1, 8).
 
-Під час запуску пояснює, що застосунок нічого не записав і зберіг пошкоджений файл;
-під час роботи — що подальші зміни зупинено. Показує
+Пояснює, що застосунок нічого не записав і зберіг пошкоджений файл (під час запуску
+чи під час роботи — тоді ще й що подальші зміни зупинено). Показує
 справні резервні копії від найновішої (дата й час, вид, розмір). «Відновити з
 вибраної копії» — лише після підтвердження «Поточні дані буде замінено даними
 копії від …». Невдача — повідомлення «Помилка» з причиною; діалог лишається
@@ -47,7 +47,8 @@ STARTUP_EXPLANATION = (
 )
 RUNTIME_EXPLANATION = (
     "Під час роботи виявлено пошкодження даних. Подальші зміни зупинено, щоб нічого "
-    "не записати в пошкоджені дані. Оберіть резервну копію для відновлення."
+    "не записати в пошкоджені дані. Пошкоджений файл збережено як «{name}» у теці даних. "
+    "Оберіть резервну копію для відновлення."
 )
 
 
@@ -56,15 +57,17 @@ class RecoveryDialog(QDialog):
 
     ``restore`` викликається з кандидатом із показаного переліку після підтвердження;
     його результат зберігається в ``restored``. ``quarantined_name`` — назва збереженого
-    пошкодженого файлу під час запуску; ``None`` — пошкодження під час роботи.
+    пошкодженого файлу; ``runtime`` — пошкодження виявлено під час роботи, а не запуску.
     """
 
     def __init__(
         self,
-        quarantined_name: str | None,
+        quarantined_name: str,
         load: Callable[[], list[RestoreCandidate]],
         restore: Callable[[RestoreCandidate], object],
         parent=None,
+        *,
+        runtime: bool = False,
     ) -> None:
         super().__init__(parent)
         self._load = load
@@ -78,9 +81,7 @@ class RecoveryDialog(QDialog):
         layout.setSpacing(SPACING[4])
         layout.addWidget(text_label("Дані пошкоджено", "heading"))
         explanation = text_label(
-            RUNTIME_EXPLANATION
-            if quarantined_name is None
-            else STARTUP_EXPLANATION.format(name=quarantined_name),
+            (RUNTIME_EXPLANATION if runtime else STARTUP_EXPLANATION).format(name=quarantined_name),
             "body",
         )
         explanation.setWordWrap(True)
