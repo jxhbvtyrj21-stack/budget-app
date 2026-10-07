@@ -14,8 +14,10 @@ from budget.platform.identity import ProductIdentity, load_product_identity
 from budget.platform.paths import DataPaths, data_paths
 from budget.platform.resources import assets_dir
 from budget.services.backup import (
+    ROLLBACK_FAILED_MESSAGE,
     BackupService,
     RecoveryService,
+    RestoreCandidate,
     RestoreError,
 )
 from budget.services.startup import prepare_database
@@ -205,6 +207,16 @@ QUARANTINE_FAILED_MESSAGE = (
     "Під час роботи виявлено пошкодження даних, але пошкоджений файл не вдалося безпечно "
     "зберегти. Застосунок нічого не записав у пошкоджені дані й буде закритий."
 )
+APPLICATION_WILL_CLOSE = "Застосунок буде закритий."
+RESTORE_ABORTED_MESSAGE = (
+    "Під час відновлення з копії сталася непередбачена помилка. Стан файлів даних не "
+    "перевірено, тому застосунок буде закритий. Пошкоджений файл лишається збереженим "
+    "у теці даних."
+)
+RESTORE_INCOMPLETE_MESSAGE = (
+    "Дані відновлено з вибраної копії, але продовжити з ними роботу не вдалося. "
+    "Застосунок буде закритий; відновлені дані лишаються в теці даних."
+)
 
 
 class RuntimeRecoveryFlow:
@@ -220,6 +232,17 @@ class RuntimeRecoveryFlow:
     (``restore_and_open``: повністю відкрита й перевірена база або ``RestoreError``,
     яку діалог показує). Лише після успіху сесія бере у власність саме повернуте
     з'єднання (``adopt``), і воно передається ``on_restored``. Інших з'єднань тут немає.
+
+    Невдачі (Block C5.3/C6):
+
+    * ``RestoreError`` з успішним відкатом — діалог лишається відкритим із причиною,
+      можна вибрати іншу копію; вікна неактивні, ``guard`` не готовий, сесія закрита.
+    * Невдалий відкат (``ROLLBACK_FAILED_MESSAGE``) або непередбачений виняток під час
+      відновлення — стан файлів не гарантований: діалог закривається, повідомлення,
+      вихід з ``EXIT_DATA_CORRUPTED``.
+    * Невдача після успішного ``restore_and_open`` (``adopt``, ``on_restored``) —
+      повернуте з'єднання закривається, вікна лишаються неактивними, ``guard`` не
+      готовий, повідомлення й той самий вихід.
     """
 
     def __init__(
@@ -238,6 +261,8 @@ class RuntimeRecoveryFlow:
         self._exit_application = exit_application
         self._show_error = show_error
         self.quarantine_error: StorageError | None = None
+        self.failure: BaseException | None = None  # невдача, після якої лише вихід
+        self._failure_message = ""
 
     def __call__(self, error: BaseException) -> None:
         from budget.ui.dialogs.recovery_dialog import RecoveryDialog
@@ -257,20 +282,63 @@ class RuntimeRecoveryFlow:
         dialog = RecoveryDialog(
             quarantined.name,
             load=self._recovery.candidates,
-            restore=lambda candidate: self._restore(candidate.backup.path),
+            restore=self._attempt_restore,
             runtime=True,
         )
         accepted = bool(dialog.exec())
         connection = dialog.restored if accepted else None
         candidate = dialog.selected()
         dialog.deleteLater()
+        if self.failure is not None:
+            self._terminate(self._failure_message)
+            return
         if connection is None:
             log.info("Runtime recovery cancelled")
             self._exit_application(EXIT_DATA_CORRUPTED)
             return
         log.info("Database restored at runtime from %s", candidate.backup.path.name)
-        self._session.adopt(connection)
-        self._on_restored(connection)
+        stage = "session.adopt"
+        try:
+            self._session.adopt(connection)
+            stage = "resume on the restored database"
+            self._on_restored(connection)
+        except Exception as failure:
+            self.failure = failure
+            log.exception("Runtime recovery failed after the restore at stage: %s", stage)
+            self._close_restored(connection)
+            self._terminate(RESTORE_INCOMPLETE_MESSAGE)
+
+    def _attempt_restore(self, candidate: RestoreCandidate) -> sqlite3.Connection | None:
+        """Одна спроба з кандидатом, вибраним у діалозі. ``RestoreError`` з успішним
+        відкатом — до діалогу (повторна спроба); інакше ``None`` і ``failure``."""
+        try:
+            return self._restore(candidate.backup.path)
+        except RestoreError as failure:
+            if failure.user_message != ROLLBACK_FAILED_MESSAGE:
+                log.warning(
+                    "Runtime restore from %s failed; another backup can be chosen",
+                    candidate.backup.path.name,
+                    exc_info=True,
+                )
+                raise
+            self.failure = failure
+            self._failure_message = f"{failure.user_message} {APPLICATION_WILL_CLOSE}"
+            log.exception("Runtime restore failed and its rollback failed too")
+        except Exception as failure:
+            self.failure = failure
+            self._failure_message = RESTORE_ABORTED_MESSAGE
+            log.exception("Runtime restore failed unexpectedly")
+        return None
+
+    def _close_restored(self, connection: sqlite3.Connection) -> None:
+        if self._session.is_open and self._session.connection is connection:
+            self._session.close()
+        else:
+            connection.close()
+
+    def _terminate(self, message: str) -> None:
+        self._show_error(message)
+        self._exit_application(EXIT_DATA_CORRUPTED)
 
 
 def restore_and_open(paths: DataPaths, clock: Clock, backup_path: Path) -> sqlite3.Connection:
@@ -329,7 +397,14 @@ def resume_after_runtime_restore(
     """
     from budget.services.facade import AppServices
 
-    window.replace_services(AppServices.create(connection, clock, backups_dir))
+    stage = "AppServices.create"
+    try:
+        services = AppServices.create(connection, clock, backups_dir)
+        stage = "MainWindow.replace_services"
+        window.replace_services(services)
+    except Exception as failure:
+        failure.add_note(f"Runtime recovery stage: {stage}")
+        raise
     _resume_ui_after_recovery()
     guard.rearm()
     log.info("Runtime recovery finished; work continues on the restored database")
