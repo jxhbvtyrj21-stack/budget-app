@@ -6,7 +6,6 @@ import sqlite3
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 from budget.domain.calendar import Clock, SystemClock
@@ -17,7 +16,6 @@ from budget.platform.resources import assets_dir
 from budget.services.backup import (
     BackupService,
     RecoveryService,
-    RestoreCandidate,
     RestoreError,
 )
 from budget.services.startup import prepare_database
@@ -166,6 +164,11 @@ class RuntimeCorruptionGuard:
             QTimer.singleShot(0, lambda: self._on_corruption(error))
         return True
 
+    def rearm(self) -> None:
+        """Лише після повністю успішного відновлення: наступне пошкодження знову
+        запускає одне відновлення. Той самий екземпляр і той самий ``sys.excepthook``."""
+        self._detected = False
+
     def __enter__(self) -> "RuntimeCorruptionGuard":
         self._previous_hook = sys.excepthook
         sys.excepthook = self._excepthook
@@ -190,15 +193,12 @@ def _suspend_ui_for_recovery(error: BaseException) -> None:
         widget.setEnabled(False)
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimeRecoveryChoice:
-    """Результат діалогу відновлення під час роботи: вибрана справна копія або скасування."""
+def _resume_ui_after_recovery() -> None:
+    """Відновлення завершено: вікна застосунку знову активні."""
+    from PySide6.QtWidgets import QApplication
 
-    candidate: RestoreCandidate | None
-
-    @property
-    def cancelled(self) -> bool:
-        return self.candidate is None
+    for widget in QApplication.topLevelWidgets():
+        widget.setEnabled(True)
 
 
 QUARANTINE_FAILED_MESSAGE = (
@@ -208,27 +208,33 @@ QUARANTINE_FAILED_MESSAGE = (
 
 
 class RuntimeRecoveryFlow:
-    """Точка входу відновлення під час роботи (``on_corruption`` для C3; Block C5.1).
+    """Точка входу відновлення під час роботи (``on_corruption`` для C3; Blocks C5.1–C5.2).
 
     Порядок: вікна неактивні → ``session.close()`` (жодного з'єднання з пошкодженою
     базою) → карантин ``.db``/``-wal``/``-shm`` → діалог «Дані пошкоджено» з назвою
     збереженого файлу й перевіреними копіями. Скасування — ``exit_application``
     з ``EXIT_DATA_CORRUPTED``: бази вже немає, працювати далі нема з чим. Невдалий
-    карантин — повідомлення й той самий вихід; діалог не відкривається. Вибрана копія
-    передається ``on_choice`` (відновлення — C5.2). Нового з'єднання тут немає.
+    карантин — повідомлення й той самий вихід; діалог не відкривається.
+
+    Вибрана й підтверджена копія відновлюється всередині діалогу через ``restore``
+    (``restore_and_open``: повністю відкрита й перевірена база або ``RestoreError``,
+    яку діалог показує). Лише після успіху сесія бере у власність саме повернуте
+    з'єднання (``adopt``), і воно передається ``on_restored``. Інших з'єднань тут немає.
     """
 
     def __init__(
         self,
         session: ApplicationSession,
         recovery: RecoveryService,
-        on_choice: Callable[[RuntimeRecoveryChoice], None],
+        restore: Callable[[Path], sqlite3.Connection],
+        on_restored: Callable[[sqlite3.Connection], None],
         exit_application: Callable[[int], None],
         show_error: Callable[[str], None],
     ) -> None:
         self._session = session
         self._recovery = recovery
-        self._on_choice = on_choice
+        self._restore = restore
+        self._on_restored = on_restored
         self._exit_application = exit_application
         self._show_error = show_error
         self.quarantine_error: StorageError | None = None
@@ -251,18 +257,20 @@ class RuntimeRecoveryFlow:
         dialog = RecoveryDialog(
             quarantined.name,
             load=self._recovery.candidates,
-            restore=lambda candidate: candidate,
+            restore=lambda candidate: self._restore(candidate.backup.path),
             runtime=True,
         )
         accepted = bool(dialog.exec())
-        choice = RuntimeRecoveryChoice(dialog.restored if accepted else None)
+        connection = dialog.restored if accepted else None
+        candidate = dialog.selected()
         dialog.deleteLater()
-        if choice.cancelled:
+        if connection is None:
             log.info("Runtime recovery cancelled")
             self._exit_application(EXIT_DATA_CORRUPTED)
             return
-        log.info("Runtime recovery backup selected: %s", choice.candidate.backup.path.name)
-        self._on_choice(choice)
+        log.info("Database restored at runtime from %s", candidate.backup.path.name)
+        self._session.adopt(connection)
+        self._on_restored(connection)
 
 
 def restore_and_open(paths: DataPaths, clock: Clock, backup_path: Path) -> sqlite3.Connection:
@@ -303,6 +311,57 @@ def _roll_back(recovery: RecoveryService, outcome, cause: BudgetError) -> None:
         raise RestoreError(
             failure.user_message, detail=f"{cause.detail}; відкат: {failure.detail}"
         ) from cause
+
+
+def resume_after_runtime_restore(
+    window,
+    connection: sqlite3.Connection,
+    clock: Clock,
+    backups_dir: Path,
+    guard: RuntimeCorruptionGuard,
+) -> None:
+    """Продовження роботи на відновленій базі (Block C5.2).
+
+    Новий граф сервісів — на з'єднанні, яким уже володіє сесія; вікно замінює граф
+    (C2). Переходу між місяцями й діалогу тривалої перерви немає: відкривається саме
+    стан копії. Потім вікна знову активні, і лише наприкінці ``guard`` знову готовий
+    до наступного пошкодження.
+    """
+    from budget.services.facade import AppServices
+
+    window.replace_services(AppServices.create(connection, clock, backups_dir))
+    _resume_ui_after_recovery()
+    guard.rearm()
+    log.info("Runtime recovery finished; work continues on the restored database")
+
+
+def runtime_recovery_guard(
+    session: ApplicationSession,
+    paths: DataPaths,
+    clock: Clock,
+    current_window: Callable[[], object],
+    *,
+    exit_application: Callable[[int], None],
+    show_error: Callable[[str], None],
+) -> RuntimeCorruptionGuard:
+    """Складає відновлення під час роботи: ``guard`` → ``RuntimeRecoveryFlow`` →
+    ``restore_and_open`` → ``resume_after_runtime_restore``. ``current_window`` дає
+    головне вікно в момент відновлення (воно створюється після ``guard``)."""
+    guard: RuntimeCorruptionGuard
+
+    def resume(connection: sqlite3.Connection) -> None:
+        resume_after_runtime_restore(current_window(), connection, clock, paths.backups, guard)
+
+    flow = RuntimeRecoveryFlow(
+        session,
+        RecoveryService(paths.database, paths.backups, clock),
+        restore=lambda backup_path: restore_and_open(paths, clock, backup_path),
+        on_restored=resume,
+        exit_application=exit_application,
+        show_error=show_error,
+    )
+    guard = RuntimeCorruptionGuard(flow)
+    return guard
 
 
 def apply_theme() -> None:
@@ -385,22 +444,15 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
     exit_code, restored = start_session(identity, session, paths, clock)
     if exit_code is not None:
         return exit_code
-    recovery = RecoveryService(paths.database, paths.backups, clock)
-
-    def await_runtime_restore(choice: RuntimeRecoveryChoice) -> None:
-        # Відновлення вибраної копії під час роботи — C5.2. Доти бази немає (карантин),
-        # тож чесно завершуємо роботу, а не лишаємо неактивне вікно.
-        log.warning("Runtime restore is not available yet; exiting")
-        application.exit(EXIT_DATA_CORRUPTED)
-
-    flow = RuntimeRecoveryFlow(
+    window = None
+    guard = runtime_recovery_guard(
         session,
-        recovery,
-        await_runtime_restore,
+        paths,
+        clock,
+        lambda: window,
         exit_application=application.exit,
         show_error=lambda text: _show_message(identity.name, text),
     )
-    guard = RuntimeCorruptionGuard(flow)
     try:
         # Посилання тримає вікно живим до кінця циклу подій.
         window = show_window_or_report(identity, session, clock, paths, restored, guard)

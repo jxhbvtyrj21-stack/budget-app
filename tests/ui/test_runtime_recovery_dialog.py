@@ -2,8 +2,8 @@
 
 Справжній цикл подій Qt і справжній ``RecoveryDialog``: пошкодження з реального слоту →
 C3 → вікна неактивні → ``session.close()`` → карантин ``.db``/``-wal``/``-shm`` → діалог
-з перевіреними копіями → вибір або скасування (``EXIT_DATA_CORRUPTED``). Самого
-відновлення (C5.2) ще немає.
+з перевіреними копіями → скасування (``EXIT_DATA_CORRUPTED``) або невдалий карантин.
+Успішне відновлення вибраної копії (C5.2) — ``test_runtime_restore.py``.
 """
 
 import errno
@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 import budget.app as app_module
@@ -33,8 +33,6 @@ from budget.services import backup as backup_service_module
 from budget.services.backup import (
     BackupKind,
     RecoveryService,
-    find_backups,
-    restore_candidates,
 )
 from budget.services.facade import AppServices
 from budget.services.setup import SetupDraft
@@ -43,7 +41,6 @@ from budget.ui.dialogs.recovery_dialog import (
     RUNTIME_EXPLANATION,
     STARTUP_EXPLANATION,
     RecoveryDialog,
-    candidate_text,
 )
 from budget.ui.main_window import MainWindow
 
@@ -71,7 +68,7 @@ def running(tmp_path, qtbot, monkeypatch):
     window = MainWindow("Budget", services)
     qtbot.addWidget(window)
     window.show()
-    # Відновлення, заміна сервісів чи нове з'єднання — поза межами C5.1.
+    # Відновлення, заміна сервісів чи нове з'єднання — не для скасування й невдалого карантину.
     forbidden = []
     monkeypatch.setattr(app_module, "restore_and_open", lambda *a: forbidden.append("restore"))
     monkeypatch.setattr(MainWindow, "replace_services", lambda *a: forbidden.append("replace"))
@@ -90,23 +87,25 @@ def previous_hook(monkeypatch):
 
 
 class Recorder:
-    """Що оркестратор передав застосунку: вибір, коди виходу, повідомлення."""
+    """Що оркестратор передав застосунку: відновлення, коди виходу, повідомлення."""
 
     def __init__(self) -> None:
-        self.choices = []
+        self.restores = []
+        self.restored = []
         self.exits = []
         self.errors = []
 
     @property
     def finished(self) -> bool:
-        return bool(self.choices or self.exits)
+        return bool(self.restored or self.exits)
 
 
 def make_flow(session, paths, recorder) -> RuntimeRecoveryFlow:
     return RuntimeRecoveryFlow(
         session,
         RecoveryService(paths.database, paths.backups, CLOCK),
-        recorder.choices.append,
+        restore=recorder.restores.append,
+        on_restored=recorder.restored.append,
         exit_application=recorder.exits.append,
         show_error=recorder.errors.append,
     )
@@ -254,45 +253,7 @@ def test_quarantine_moves_db_wal_and_shm_together(qtbot, running, monkeypatch, p
     assert forbidden == []
 
 
-# Діалог: вибір і скасування -----------------------------------------------------------------
-
-
-def test_selected_candidate_is_handed_over_without_restoring(
-    qtbot, running, monkeypatch, previous_hook
-):
-    paths, session, _, window, forbidden, _ = running
-    before = sorted(p.name for p in paths.backups.iterdir())
-    corrupt_pages(paths.database)
-    confirm(monkeypatch, True)
-    shown = {}
-
-    def choose_second(dialog):
-        shown["texts"] = [dialog.list.item(i).text() for i in range(dialog.list.count())]
-        shown["candidates"] = [
-            dialog.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(dialog.list.count())
-        ]
-        shown["windows_enabled"] = window.isEnabled()
-        dialog.list.setCurrentRow(1)
-        dialog.restore_selected()
-
-    recorder, seen = Recorder(), []
-    run_runtime_recovery(
-        qtbot, make_flow(session, paths, recorder), window, recorder, choose_second, seen
-    )
-    # Лише перевірені копії, від найновішої; пошкоджена й нерозпізнана не показуються.
-    expected = restore_candidates(paths.backups)
-    assert shown["texts"] == [candidate_text(c) for c in expected]
-    assert expected[0].backup.kind is BackupKind.ON_DEMAND
-    assert shown["windows_enabled"] is False
-    (choice,) = recorder.choices
-    assert not choice.cancelled and choice.candidate is shown["candidates"][1]
-    assert recorder.exits == [] and len(seen) == 1 and previous_hook == []
-    # Відновлення ще немає: копії не змінені, BEFORE_RESTORE немає, база в карантині.
-    assert forbidden == [] and not session.is_open
-    assert sorted(p.name for p in paths.backups.iterdir()) == before
-    assert BackupKind.BEFORE_RESTORE not in {b.kind for b in find_backups(paths.backups)}
-    assert not paths.database.exists()
-    assert not window.isEnabled()
+# Діалог: скасування -----------------------------------------------------------------
 
 
 def test_cancel_exits_with_data_corrupted(qtbot, running, previous_hook):
@@ -302,7 +263,7 @@ def test_cancel_exits_with_data_corrupted(qtbot, running, previous_hook):
     recorder = Recorder()
     run_runtime_recovery(qtbot, make_flow(session, paths, recorder), window, recorder, cancel)
     assert recorder.exits == [EXIT_DATA_CORRUPTED]
-    assert recorder.choices == [] and recorder.errors == []
+    assert recorder.restores == recorder.restored == [] and recorder.errors == []
     assert not window.isEnabled()  # звичайна робота не продовжується
     assert visible_recovery_dialogs() == []
     assert not session.is_open and not paths.database.exists()
@@ -351,7 +312,7 @@ def test_quarantine_failure_shows_error_and_exits_without_dialog(
     with caplog.at_level(logging.ERROR):
         run_runtime_recovery(qtbot, flow, window, recorder)
     assert recorder.errors == [QUARANTINE_FAILED_MESSAGE]
-    assert recorder.exits == [EXIT_DATA_CORRUPTED] and recorder.choices == []
+    assert recorder.exits == [EXIT_DATA_CORRUPTED] and recorder.restores == recorder.restored == []
     assert visible_recovery_dialogs() == []  # діалог не відкривався
     # Первинна помилка збережена й у журналі; файли бази лишилися на місці.
     assert isinstance(flow.quarantine_error, StorageError)
