@@ -4,6 +4,7 @@ import hashlib
 import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -171,3 +172,132 @@ def test_backup_while_another_connection_holds_write_lock(paths, clock):
     tables = {r[0] for r in copy.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     copy.close()
     assert "uncommitted" not in tables
+
+
+# Межа невдалої копії (H3): помилка копії не зупиняє запуск і не маскує пошкодження ------
+
+
+def make_backups_unavailable(paths) -> None:
+    """Тека копій недоступна: на її місці звичайний файл (справжня помилка ОС)."""
+    if paths.backups.is_dir():
+        for path in paths.backups.iterdir():
+            path.unlink()
+        paths.backups.rmdir()
+    paths.backups.write_bytes(b"not a directory")
+
+
+@pytest.mark.parametrize("kind", ["daily", "weekly", "monthly"])
+def test_unavailable_backups_directory_is_logged_and_startup_continues(paths, clock, caplog, kind):
+    start(paths, clock)
+    make_backups_unavailable(paths)
+    clock.set(START + timedelta(days=40))  # новий день, тиждень і місяць — усі три копії
+    with caplog.at_level(logging.ERROR):
+        connection = open_application_database(paths, clock)
+    try:
+        # Запуск продовжено на тому самому з'єднанні: база читається й записується.
+        assert schema_version(connection) == LATEST_VERSION
+        connection.execute("UPDATE general_remainder SET balance = 777")
+        assert connection.execute("SELECT balance FROM general_remainder").fetchone() == (777,)
+    finally:
+        connection.close()
+    failures = [
+        r for r in caplog.records if r.getMessage() == f"Автоматична копія «{kind}» не створена"
+    ]
+    assert len(failures) == 1
+    reason = failures[0].exc_info[1]
+    assert isinstance(reason, StorageError) and not isinstance(reason, DatabaseCorruptedError)
+    assert "Не вдалося створити файл резервної копії" in reason.detail
+    assert isinstance(reason.__cause__, OSError)
+    assert paths.backups.is_file()  # нічого не створено й не «виправлено» замість користувача
+
+
+def test_backup_destination_sqlite_error_is_logged_and_startup_continues(
+    paths, clock, monkeypatch, caplog
+):
+    start(paths, clock)
+    original_connect = sqlite3.connect
+
+    def connect(target, *args, **kwargs):
+        if Path(str(target)).parent == paths.backups:
+            raise sqlite3.OperationalError("unable to open database file")
+        return original_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    before = backup_names(paths)
+    clock.set(START + timedelta(days=40))
+    with caplog.at_level(logging.ERROR):
+        connection = open_application_database(paths, clock)
+    assert schema_version(connection) == LATEST_VERSION
+    connection.close()
+    assert backup_names(paths) == before
+    reasons = [r.exc_info[1] for r in caplog.records if r.exc_info]
+    assert len(reasons) == 3 and all(isinstance(e, StorageError) for e in reasons)
+    assert all(isinstance(e.__cause__, sqlite3.OperationalError) for e in reasons)
+
+
+def test_failed_backup_closes_its_file_and_keeps_application_connection(paths, clock, monkeypatch):
+    """Невдала перевірка нової копії: файл копії закрито й прибрано (на Windows відкритий
+    файл не видалився б), з'єднання застосунку працює далі, наступна копія вдається."""
+    connection = open_application_database(paths, clock)
+    service = backup_service_module.BackupService(connection, paths.backups, clock)
+    original_check = backup_module.integrity_check
+    monkeypatch.setattr(
+        backup_module, "integrity_check", lambda c: c is connection and original_check(c)
+    )
+    with pytest.raises(StorageError):
+        service.create_backup(BackupKind.ON_DEMAND)
+    assert backup_names(paths, BackupKind.ON_DEMAND) == []
+    assert connection.execute("SELECT 1").fetchone() == (1,)
+    monkeypatch.setattr(backup_module, "integrity_check", original_check)
+    created = service.create_backup(BackupKind.ON_DEMAND)  # та сама назва — файл вільний
+    assert created.name in backup_names(paths, BackupKind.ON_DEMAND)
+    connection.close()
+
+
+def test_corruption_is_not_masked_by_unavailable_backups(paths, clock):
+    """Пошкоджена база й недоступна тека копій: перемагає шлях пошкодження."""
+    start(paths, clock)
+    make_backups_unavailable(paths)
+    pages = paths.database.stat().st_size // 4096
+    with paths.database.open("r+b") as handle:
+        for page in range(2, max(pages, 3)):
+            handle.seek(page * 4096)
+            handle.write(b"\xa5" * 4096)
+    clock.set(START + timedelta(days=1))
+    with pytest.raises(DatabaseCorruptedError):
+        open_application_database(paths, clock)
+    quarantined = RecoveryService(paths.database, paths.backups, clock).quarantine_corrupted()
+    assert quarantined.exists() and not paths.database.exists()
+
+
+def test_source_corruption_found_by_backup_is_not_masked_by_unavailable_backups(
+    paths, clock, monkeypatch
+):
+    """Повна перевірка джерела в копії виконується раніше за доступ до теки копій."""
+    start(paths, clock)
+    make_backups_unavailable(paths)
+    monkeypatch.setattr(backup_module, "integrity_check", lambda connection: False)
+    clock.set(START + timedelta(days=1))
+    with pytest.raises(DatabaseCorruptedError):
+        open_application_database(paths, clock)
+
+
+def test_failed_before_migration_backup_stops_migration_in_a_controlled_way(
+    paths, clock, monkeypatch
+):
+    """DS-5/DS-7: міграція — лише після обов'язкової копії. Недоступна тека копій —
+    ``StorageError`` (а не сирий виняток ОС), міграція не виконується, база не змінена."""
+    start(paths, clock)
+    database_digest = digest(paths.database)
+    make_backups_unavailable(paths)
+    extra = (LATEST_VERSION + 1, "CREATE TABLE probe (id INTEGER PRIMARY KEY) STRICT;")
+    monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS, extra))
+    monkeypatch.setattr(migrations, "LATEST_VERSION", extra[0])
+    with pytest.raises(StorageError) as raised:
+        open_application_database(paths, clock)
+    assert not isinstance(raised.value, DatabaseCorruptedError)
+    assert isinstance(raised.value.__cause__, OSError)
+    check = sqlite3.connect(paths.database)
+    assert schema_version(check) == LATEST_VERSION  # міграцію не виконано
+    check.close()
+    assert digest(paths.database) == database_digest
