@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QFrame, QGridLayout, QVBoxLayout
 from budget.domain.money import Money
 from budget.services.facade import AppServices
 from budget.ui.components.basic import Panel, amount_label, button, text_label
+from budget.ui.components.read_error import ReadBoundary
 from budget.ui.dialogs.base_minimum_dialog import BaseMinimumDialog
 from budget.ui.formatting import format_money, format_month
 from budget.ui.messages import comparison_text
@@ -36,6 +37,7 @@ class OverviewPage(Page):
     debts_requested = Signal()
     month_requested = Signal()
     changed = Signal()
+    service_requested = Signal()
 
     def __init__(self, services: AppServices) -> None:
         super().__init__("Огляд")
@@ -49,27 +51,34 @@ class OverviewPage(Page):
         new_expense = button("Нова витрата", "primary")
         new_expense.clicked.connect(self.new_expense_requested.emit)
         self.header.addWidget(new_expense)
+        # Вміст — в окремому контейнері: під час помилки читання його не видно (IA 12).
+        self.reads = ReadBoundary(self.body)
+        self.reads.error_state.service_requested.connect(self.service_requested.emit)
+        content = self.reads.content_body
         self.summary = Panel()
-        self.body.addWidget(self.summary)
+        content.addWidget(self.summary)
         self.empty_state = text_label(START_WITH_INCOME, "body", muted=True)
-        self.body.addWidget(self.empty_state)
+        content.addWidget(self.empty_state)
         self.composition = QGridLayout()
         self.composition.setSpacing(SPACING[5])
-        self.body.addLayout(self.composition)
+        content.addLayout(self.composition)
         self.month_label = text_label("", "heading")
-        self.body.addWidget(self.month_label)
+        content.addWidget(self.month_label)
         # Поточний місяць — компактно: підсумки, базовий мінімум і перехід до Місяця.
         self.current_month = QVBoxLayout()
         self.current_month.setSpacing(SPACING[2])
-        self.body.addLayout(self.current_month)
+        content.addLayout(self.current_month)
         # Зобов'язання — окрема секція після розділювача, поза загальною доступною
         # сумою (ADR 0018, п. 8; ui-information-architecture.md, 4.1).
         self.obligations = Section()
-        self.body.addWidget(self.obligations)
-        self.body.addStretch(1)
-        self.refresh()
+        content.addWidget(self.obligations)
+        content.addStretch(1)
+        self._load()  # побудова сторінки — без межі читання
 
-    def refresh(self) -> None:
+    def refresh(self, *, guarded: bool = True) -> None:
+        self.reads.run(self._load, guarded=guarded)
+
+    def _load(self) -> None:
         funds = self._services.balances.available_funds()
         self.empty_state.setVisible(not self._services.analysis.has_financial_records())
         clear_layout(self.summary.body)

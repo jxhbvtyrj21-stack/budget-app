@@ -28,6 +28,7 @@ from budget.services.accumulation import ARCHIVED_NOTICE, AccumulationView, stat
 from budget.services.facade import AppServices
 from budget.ui.components.basic import Panel, amount_label, button, text_label
 from budget.ui.components.forms import ListRow, Notice
+from budget.ui.components.read_error import ReadBoundary
 from budget.ui.components.status import ProgressView, archive_marker, status_badge
 from budget.ui.dialogs.accumulation_dialog import AccumulationDialog
 from budget.ui.dialogs.replenishment_dialog import ReplenishmentDialog
@@ -103,6 +104,7 @@ class AccumulationRow(QFrame):
 class AccumulationListPage(Page):
     open_requested = Signal(int)
     changed = Signal()
+    service_requested = Signal()
 
     def __init__(self, services: AppServices) -> None:
         super().__init__("Накопичення")
@@ -127,11 +129,14 @@ class AccumulationListPage(Page):
         self.working_button.setChecked(True)
         self.body.addLayout(switch)
 
+        # Вміст — в окремому контейнері: під час помилки читання його не видно (IA 12).
+        self.reads = ReadBoundary(self.body)
+        self.reads.error_state.service_requested.connect(self.service_requested.emit)
         self.sections = QVBoxLayout()
         self.sections.setSpacing(SPACING[6])
-        self.body.addLayout(self.sections)
-        self.body.addStretch(1)
-        self.refresh()
+        self.reads.content_body.addLayout(self.sections)
+        self.reads.content_body.addStretch(1)
+        self._load()  # побудова сторінки — без межі читання
 
     def showing_archive(self) -> bool:
         return self.archive_button.isChecked()
@@ -140,7 +145,10 @@ class AccumulationListPage(Page):
         (self.archive_button if archive else self.working_button).setChecked(True)
         self.refresh()
 
-    def refresh(self) -> None:
+    def refresh(self, *, guarded: bool = True) -> None:
+        self.reads.run(self._load, guarded=guarded)
+
+    def _load(self) -> None:
         clear_layout(self.sections)
         self.group_panels: dict[AccumulationStatus, Panel] = {}
         self.rows: list[AccumulationRow] = []
@@ -196,10 +204,12 @@ class AccumulationDetailPage(Page):
 
     back_requested = Signal()
     changed = Signal()
+    service_requested = Signal()
 
     def __init__(self, services: AppServices) -> None:
         super().__init__("")
         self._services = services
+        self.accumulation_id: int | None = None
         self.view: AccumulationView | None = None
 
         crumbs = QHBoxLayout()
@@ -216,6 +226,10 @@ class AccumulationDetailPage(Page):
         self.header.addStretch(1)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+        # Вміст — в окремому контейнері: під час помилки читання його не видно (IA 12).
+        self.reads = ReadBoundary(self.body)
+        self.reads.error_state.service_requested.connect(self.service_requested.emit)
+        content = self.reads.content_body
         summary = Panel()
         summary.body.addWidget(text_label("Залишок", "caption", muted=True))
         self.balance = text_label("", "display-amount")
@@ -224,10 +238,10 @@ class AccumulationDetailPage(Page):
         summary.body.addLayout(self.target_area)
         self.description = text_label("", "body")
         summary.body.addWidget(self.description)
-        self.body.addWidget(summary)
+        content.addWidget(summary)
 
         self.archived_notice = Notice("Обмеження", ARCHIVED_NOTICE)
-        self.body.addWidget(self.archived_notice)
+        content.addWidget(self.archived_notice)
 
         actions = QHBoxLayout()
         actions.setSpacing(SPACING[3])
@@ -251,17 +265,17 @@ class AccumulationDetailPage(Page):
         ):
             actions.addWidget(widget)
         actions.addStretch(1)
-        self.body.addLayout(actions)
+        content.addLayout(actions)
         self.close_hint = text_label("", "secondary", muted=True)
-        self.body.addWidget(self.close_hint)
+        content.addWidget(self.close_hint)
 
         history = Panel()
         history.body.addWidget(text_label("Історія операцій", "heading"))
         self.history_rows = QVBoxLayout()
         self.history_rows.setSpacing(0)
         history.body.addLayout(self.history_rows)
-        self.body.addWidget(history)
-        self.body.addStretch(1)
+        content.addWidget(history)
+        content.addStretch(1)
 
     def keyPressEvent(self, event) -> None:
         """``Esc`` і ``Alt+←`` повертають до переліку (ui-information-architecture.md, 3)."""
@@ -276,16 +290,24 @@ class AccumulationDetailPage(Page):
     # Відображення ----------------------------------------------------------------------
 
     def show_accumulation(self, accumulation_id: int) -> None:
-        self.view = self._services.accumulations.get(accumulation_id)
-        self.refresh()
+        # Заголовок попередньої картки не лишається, якщо нову прочитати не вдалося.
+        self.accumulation_id = accumulation_id
+        self.view = None
+        self.title_label.setText("")
+        self.breadcrumb.setText("")
+        clear_layout(self.badge_row)
+        self.reads.run(self._load)
         # Фокус — на картці, щоб Esc і Alt+← повертали до переліку.
         self.setFocus()
 
-    def refresh(self) -> None:
-        if self.view is None:
+    def refresh(self, *, guarded: bool = True) -> None:
+        if self.accumulation_id is None:
             return
+        self.reads.run(self._load, guarded=guarded)
+
+    def _load(self) -> None:
         service = self._services.accumulations
-        view = self.view = service.get(self.view.accumulation.id)
+        view = self.view = service.get(self.accumulation_id)
         accumulation = view.accumulation
         self.title_label.setText(accumulation.name)
         self.breadcrumb.setText(f"Накопичення / {accumulation.name}")
@@ -403,6 +425,7 @@ class AccumulationsPage(QStackedWidget):
     """Маршрут «Накопичення»: перелік і вкладена картка без окремого пункту навігації."""
 
     changed = Signal()
+    service_requested = Signal()
 
     def __init__(self, services: AppServices) -> None:
         super().__init__()
@@ -414,6 +437,8 @@ class AccumulationsPage(QStackedWidget):
         self.list_page.changed.connect(self.changed.emit)
         self.detail_page.back_requested.connect(self.show_list)
         self.detail_page.changed.connect(self.changed.emit)
+        self.list_page.service_requested.connect(self.service_requested.emit)
+        self.detail_page.service_requested.connect(self.service_requested.emit)
 
     def open_detail(self, accumulation_id: int) -> None:
         self.detail_page.show_accumulation(accumulation_id)
@@ -426,7 +451,7 @@ class AccumulationsPage(QStackedWidget):
     def showing_detail(self) -> bool:
         return self.currentWidget() is self.detail_page
 
-    def refresh(self) -> None:
-        self.list_page.refresh()
+    def refresh(self, *, guarded: bool = True) -> None:
+        self.list_page.refresh(guarded=guarded)
         if self.showing_detail():
-            self.detail_page.refresh()
+            self.detail_page.refresh(guarded=guarded)

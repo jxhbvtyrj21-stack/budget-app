@@ -35,6 +35,13 @@ class StorageError(BudgetError):
     default_message = "Не вдалося прочитати або зберегти дані."
 
 
+class DataReadError(StorageError):
+    """Звичайна (не пошкодження) помилка читання для екрана (IA 12). Створює її лише
+    ``services.read_errors.read_failure``; пошкодження бази нею ніколи не стає."""
+
+    default_message = "Не вдалося прочитати дані."
+
+
 class DatabaseCorruptedError(StorageError):
     """База даних пошкоджена; застосунок не повинен у неї писати (DS-6)."""
 

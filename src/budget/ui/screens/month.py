@@ -18,6 +18,7 @@ from budget.services.month_analysis import AccumulationMovement, MonthAnalysis
 from budget.services.replenishment import ReplenishmentView
 from budget.ui.components.basic import Panel, amount_label, button, text_label
 from budget.ui.components.forms import ListRow, Notice
+from budget.ui.components.read_error import ReadBoundary
 from budget.ui.dialogs.base_minimum_dialog import BaseMinimumDialog
 from budget.ui.dialogs.debt_dialogs import LoanReceiptDialog, RepaymentDialog
 from budget.ui.dialogs.expense_dialog import ExpenseDialog
@@ -57,6 +58,7 @@ NO_RECORDS = "Фінансових записів немає."
 class MonthPage(Page):
     new_income_requested = Signal()
     changed = Signal()
+    service_requested = Signal()
 
     def __init__(self, services: AppServices) -> None:
         super().__init__("")
@@ -89,21 +91,25 @@ class MonthPage(Page):
             self.actions_row.addWidget(action)
         self.body.insertLayout(1, self.actions_row)
 
+        # Вміст — в окремому контейнері: під час помилки читання його не видно (IA 12).
+        self.reads = ReadBoundary(self.body)
+        self.reads.error_state.service_requested.connect(self.service_requested.emit)
+        content = self.reads.content_body
         self.read_only_banner = Notice("Минулий місяць — лише перегляд")
         self.read_only_banner.setObjectName("InfoBanner")
-        self.body.addWidget(self.read_only_banner)
+        content.addWidget(self.read_only_banner)
         self.no_records = text_label(NO_RECORDS, "body", muted=True)
-        self.body.addWidget(self.no_records)
+        content.addWidget(self.no_records)
         self.summary = Panel()
-        self.body.addWidget(self.summary)
+        content.addWidget(self.summary)
         self._record_panels: list[Panel] = []
         self.income_rows = self._section("Доходи")
         self.expense_rows = self._section("Витрати")
         self.replenishment_rows = self._section("Поповнення накопичень")
         self.debt_rows = self._section("Борги")
         self.movement_rows = self._section("Рух накопичень")
-        self.body.addStretch(1)
-        self.refresh()
+        content.addStretch(1)
+        self._load()  # побудова сторінки — без межі читання
 
     def _section(self, title: str) -> QVBoxLayout:
         panel = Panel()
@@ -112,7 +118,7 @@ class MonthPage(Page):
         rows = QVBoxLayout()
         rows.setSpacing(0)
         panel.body.addLayout(rows)
-        self.body.addWidget(panel)
+        self.reads.content_body.addWidget(panel)
         return rows
 
     @staticmethod
@@ -131,13 +137,19 @@ class MonthPage(Page):
         return self._services.months.is_current(self.month)
 
     def show_month(self, month: CalendarMonth) -> None:
-        current = self._services.months.current_month()
-        self.month = max(self.first_month(), min(current, month))
-        self.refresh()
+        def load() -> None:
+            current = self._services.months.current_month()
+            self.month = max(self.first_month(), min(current, month))
+            self._load()
+
+        self.reads.run(load)
 
     # Відображення ----------------------------------------------------------------------
 
-    def refresh(self) -> None:
+    def refresh(self, *, guarded: bool = True) -> None:
+        self.reads.run(self._load, guarded=guarded)
+
+    def _load(self) -> None:
         current = self._services.months.current_month()
         if self.month > current:
             self.month = current

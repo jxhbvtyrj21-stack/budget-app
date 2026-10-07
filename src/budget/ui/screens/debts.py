@@ -16,6 +16,7 @@ from budget.services.balances import DebtView
 from budget.services.facade import AppServices
 from budget.ui.components.basic import Panel, amount_label, button, text_label
 from budget.ui.components.forms import ListRow
+from budget.ui.components.read_error import ReadBoundary
 from budget.ui.components.status import debt_badge
 from budget.ui.dialogs.debt_dialogs import DebtMetadataDialog, LoanReceiptDialog, RepaymentDialog
 from budget.ui.formatting import format_money, format_month
@@ -72,6 +73,7 @@ class DebtRow(QFrame):
 class DebtListPage(Page):
     open_requested = Signal(int)
     changed = Signal()
+    service_requested = Signal()
 
     def __init__(self, services: AppServices) -> None:
         super().__init__("Борги")
@@ -79,7 +81,10 @@ class DebtListPage(Page):
         self.new_button = button("Отримати позикові кошти", "primary")
         self.new_button.clicked.connect(self.open_new)
         self.header.addWidget(self.new_button)
-        self.body.addWidget(
+        # Вміст — в окремому контейнері: під час помилки читання його не видно (IA 12).
+        self.reads = ReadBoundary(self.body)
+        self.reads.error_state.service_requested.connect(self.service_requested.emit)
+        self.reads.content_body.addWidget(
             text_label(
                 "Борги не входять до загальної доступної суми й не зменшують її.",
                 "secondary",
@@ -88,11 +93,14 @@ class DebtListPage(Page):
         )
         self.sections = QVBoxLayout()
         self.sections.setSpacing(SPACING[6])
-        self.body.addLayout(self.sections)
-        self.body.addStretch(1)
-        self.refresh()
+        self.reads.content_body.addLayout(self.sections)
+        self.reads.content_body.addStretch(1)
+        self._load()  # побудова сторінки — без межі читання
 
-    def refresh(self) -> None:
+    def refresh(self, *, guarded: bool = True) -> None:
+        self.reads.run(self._load, guarded=guarded)
+
+    def _load(self) -> None:
         clear_layout(self.sections)
         self.group_panels: dict[DebtStatus, Panel] = {}
         self.rows: list[DebtRow] = []
@@ -129,10 +137,12 @@ class DebtListPage(Page):
 class DebtDetailPage(Page):
     back_requested = Signal()
     changed = Signal()
+    service_requested = Signal()
 
     def __init__(self, services: AppServices) -> None:
         super().__init__("")
         self._services = services
+        self.debt_id: int | None = None
         self.view: DebtView | None = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -148,6 +158,10 @@ class DebtDetailPage(Page):
         self.header.addLayout(self.badge_row)
         self.header.addStretch(1)
 
+        # Вміст — в окремому контейнері: під час помилки читання його не видно (IA 12).
+        self.reads = ReadBoundary(self.body)
+        self.reads.error_state.service_requested.connect(self.service_requested.emit)
+        content = self.reads.content_body
         summary = Panel()
         summary.body.addWidget(text_label("Залишок боргу", "caption", muted=True))
         self.remaining = text_label("", "display-amount")
@@ -156,7 +170,7 @@ class DebtDetailPage(Page):
         summary.body.addWidget(self.amounts)
         self.description = text_label("", "body")
         summary.body.addWidget(self.description)
-        self.body.addWidget(summary)
+        content.addWidget(summary)
 
         actions = QHBoxLayout()
         actions.setSpacing(SPACING[3])
@@ -167,15 +181,15 @@ class DebtDetailPage(Page):
         actions.addWidget(self.repay_button)
         actions.addWidget(self.edit_button)
         actions.addStretch(1)
-        self.body.addLayout(actions)
+        content.addLayout(actions)
 
         history = Panel()
         history.body.addWidget(text_label("Історія операцій", "heading"))
         self.history_rows = QVBoxLayout()
         self.history_rows.setSpacing(0)
         history.body.addLayout(self.history_rows)
-        self.body.addWidget(history)
-        self.body.addStretch(1)
+        content.addWidget(history)
+        content.addStretch(1)
 
     def keyPressEvent(self, event) -> None:
         """``Esc`` і ``Alt+←`` повертають до переліку (ui-information-architecture.md, 3)."""
@@ -188,14 +202,22 @@ class DebtDetailPage(Page):
         super().keyPressEvent(event)
 
     def show_debt(self, debt_id: int) -> None:
-        self.view = self._services.debts.get(debt_id)
-        self.refresh()
+        # Заголовок попередньої картки не лишається, якщо нову прочитати не вдалося.
+        self.debt_id = debt_id
+        self.view = None
+        self.title_label.setText("")
+        self.breadcrumb.setText("")
+        clear_layout(self.badge_row)
+        self.reads.run(self._load)
         self.setFocus()
 
-    def refresh(self) -> None:
-        if self.view is None:
+    def refresh(self, *, guarded: bool = True) -> None:
+        if self.debt_id is None:
             return
-        view = self.view = self._services.debts.get(self.view.debt.id)
+        self.reads.run(self._load, guarded=guarded)
+
+    def _load(self) -> None:
+        view = self.view = self._services.debts.get(self.debt_id)
         debt = view.debt
         self.title_label.setText(debt.name)
         self.breadcrumb.setText(f"Борги / {debt.name}")
@@ -256,6 +278,7 @@ class DebtsPage(QStackedWidget):
     """Маршрут «Борги»: перелік і вкладена картка без окремого пункту навігації."""
 
     changed = Signal()
+    service_requested = Signal()
 
     def __init__(self, services: AppServices) -> None:
         super().__init__()
@@ -267,6 +290,8 @@ class DebtsPage(QStackedWidget):
         self.list_page.changed.connect(self.changed.emit)
         self.detail_page.back_requested.connect(self.show_list)
         self.detail_page.changed.connect(self.changed.emit)
+        self.list_page.service_requested.connect(self.service_requested.emit)
+        self.detail_page.service_requested.connect(self.service_requested.emit)
 
     def open_detail(self, debt_id: int) -> None:
         self.detail_page.show_debt(debt_id)
@@ -279,7 +304,7 @@ class DebtsPage(QStackedWidget):
     def showing_detail(self) -> bool:
         return self.currentWidget() is self.detail_page
 
-    def refresh(self) -> None:
-        self.list_page.refresh()
+    def refresh(self, *, guarded: bool = True) -> None:
+        self.list_page.refresh(guarded=guarded)
         if self.showing_detail():
-            self.detail_page.refresh()
+            self.detail_page.refresh(guarded=guarded)

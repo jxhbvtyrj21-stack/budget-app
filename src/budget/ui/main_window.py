@@ -114,7 +114,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.sidebar)
         self.overview = OverviewPage(self._services)
         self.overview.new_income_requested.connect(self.open_income_dialog)
-        self.overview.long_gap_requested.connect(self.open_long_gap_dialog)
+        self.overview.long_gap_requested.connect(
+            lambda: self.open_long_gap_dialog(read_boundary=True)
+        )
         self.month = MonthPage(self._services)
         self.month.new_income_requested.connect(self.open_income_dialog)
         self.month.changed.connect(self.refresh)
@@ -131,6 +133,9 @@ class MainWindow(QMainWindow):
         self.overview.debts_requested.connect(lambda: self.navigate("debts"))
         self.overview.month_requested.connect(self.open_current_month)
         self.overview.changed.connect(self.refresh)
+        # «Помилка» читання на екрані (IA 12): кнопка «Сервіс» — наявний перехід.
+        for page in (self.overview, self.month, self.accumulations, self.debts):
+            page.service_requested.connect(lambda: self.navigate("service"))
         # «Сервіс» потребує теки резервних копій; без неї (лише в тестах) — заглушка.
         self.service = None
         if self._services.backups is not None:
@@ -170,12 +175,14 @@ class MainWindow(QMainWindow):
         if self.sidebar is not None:
             self.sidebar.set_active(route)
 
-    def refresh(self) -> None:
+    def refresh(self, *, guarded: bool = True) -> None:
+        """Оновлення побудованих екранів. ``guarded`` — межа читання (IA 12): звичайна
+        помилка читання показується на екрані; пошкодження бази йде далі без змін."""
         if self.sidebar is not None:
-            self.overview.refresh()
-            self.month.refresh()
-            self.accumulations.refresh()
-            self.debts.refresh()
+            self.overview.refresh(guarded=guarded)
+            self.month.refresh(guarded=guarded)
+            self.accumulations.refresh(guarded=guarded)
+            self.debts.refresh(guarded=guarded)
 
     def open_income_dialog(self) -> None:
         if IncomeDialog(self._services.incomes, self).exec():
@@ -193,14 +200,16 @@ class MainWindow(QMainWindow):
         if ReplenishmentDialog(self._services.replenishments, parent=self).exec():
             self.refresh()
 
-    def open_long_gap_dialog(self) -> None:
+    def open_long_gap_dialog(self, *, read_boundary: bool = False) -> None:
+        """Діалог тривалої перерви. Під час запуску (``show_main_window``) — без межі
+        читання, як і раніше; з кнопки «Вирішити» на Огляді — з межею."""
         pending = self._services.transitions.pending_long_gap()
         if pending is None:
             return
         dialog = LongGapDialog(pending.total, self)
         if dialog.exec() and dialog.choice is not None:
             self._services.transitions.resolve_long_gap(dialog.choice)
-        self.refresh()
+        self.refresh(guarded=read_boundary)
 
     def _on_restore_requested(self, candidate: RestoreCandidate) -> None:
         if self._restore_handler is None:
