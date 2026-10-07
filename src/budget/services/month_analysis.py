@@ -26,6 +26,7 @@ from budget.storage.repositories import (
     BaseMinimumRepository,
     DebtRepository,
     ExpenseRepository,
+    FinancialRecordRepository,
     IncomeRepository,
     ReplenishmentRepository,
 )
@@ -75,6 +76,16 @@ class MonthAnalysisService:
         self._debts = DebtRepository(connection)
         self._accumulations = AccumulationRepository(connection)
         self._base_minimums = BaseMinimumRepository(connection)
+        self._records = FinancialRecordRepository(connection)
+
+    def has_financial_records(self) -> bool:
+        """Чи є хоч один фінансовий запис у будь-якому місяці (лише читання).
+
+        Записи — доходи, витрати, поповнення, отримання позикових коштів і погашення
+        (``months_with_records``); стартовий стан майстра записом не є. Баланс і
+        поточний місяць на відповідь не впливають (порожній «Огляд», IA 12).
+        """
+        return bool(self._records.months_with_records())
 
     def analyse(self, month: CalendarMonth) -> MonthAnalysis:
         expenses = self._expenses.list_for_month(month)

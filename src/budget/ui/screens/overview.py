@@ -12,6 +12,10 @@ from budget.ui.messages import comparison_text
 from budget.ui.screens.page import Page, clear_layout
 from budget.ui.theme.tokens import SPACING
 
+# Порожній стан (IA 12): після налаштування немає жодного фінансового запису. Кнопка
+# «Новий дохід» уже є в заголовку екрана, тому окремо не дублюється.
+START_WITH_INCOME = "Почніть із нового доходу."
+
 
 class Section(QFrame):
     """Секція з верхнім розділювачем, без панелі."""
@@ -36,9 +40,9 @@ class OverviewPage(Page):
     def __init__(self, services: AppServices) -> None:
         super().__init__("Огляд")
         self._services = services
-        new_income = button("Новий дохід")
-        new_income.clicked.connect(self.new_income_requested.emit)
-        self.header.addWidget(new_income)
+        self.new_income_button = button("Новий дохід")
+        self.new_income_button.clicked.connect(self.new_income_requested.emit)
+        self.header.addWidget(self.new_income_button)
         self.new_replenishment_button = button("Поповнити накопичення")
         self.new_replenishment_button.clicked.connect(self.new_replenishment_requested.emit)
         self.header.addWidget(self.new_replenishment_button)
@@ -47,6 +51,8 @@ class OverviewPage(Page):
         self.header.addWidget(new_expense)
         self.summary = Panel()
         self.body.addWidget(self.summary)
+        self.empty_state = text_label(START_WITH_INCOME, "body", muted=True)
+        self.body.addWidget(self.empty_state)
         self.composition = QGridLayout()
         self.composition.setSpacing(SPACING[5])
         self.body.addLayout(self.composition)
@@ -65,6 +71,7 @@ class OverviewPage(Page):
 
     def refresh(self) -> None:
         funds = self._services.balances.available_funds()
+        self.empty_state.setVisible(not self._services.analysis.has_financial_records())
         clear_layout(self.summary.body)
         self.summary.body.addWidget(text_label("Загальна доступна сума", "subheading", muted=True))
         self.total_label = amount_label(funds.total, "display-amount")
