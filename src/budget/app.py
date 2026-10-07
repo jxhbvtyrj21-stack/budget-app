@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from budget.domain.calendar import Clock, SystemClock
@@ -13,7 +14,12 @@ from budget.errors import BudgetError, DatabaseCorruptedError, StartupError
 from budget.platform.identity import ProductIdentity, load_product_identity
 from budget.platform.paths import DataPaths, data_paths
 from budget.platform.resources import assets_dir
-from budget.services.backup import BackupService, RecoveryService, RestoreError
+from budget.services.backup import (
+    BackupService,
+    RecoveryService,
+    RestoreCandidate,
+    RestoreError,
+)
 from budget.services.startup import prepare_database
 from budget.storage.integrity import corruption_code, quick_check
 
@@ -176,12 +182,60 @@ class RuntimeCorruptionGuard:
 
 
 def _suspend_ui_for_recovery(error: BaseException) -> None:
-    """Поки відновлення не виконано (C4–C6), звичайна робота з пошкодженою базою зупинена:
+    """Поки відновлення не виконано (C5–C6), звичайна робота з пошкодженою базою зупинена:
     усі вікна застосунку стають неактивними."""
     from PySide6.QtWidgets import QApplication
 
     for widget in QApplication.topLevelWidgets():
         widget.setEnabled(False)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeRecoveryChoice:
+    """Результат діалогу відновлення під час роботи: вибрана справна копія або скасування."""
+
+    candidate: RestoreCandidate | None
+
+    @property
+    def cancelled(self) -> bool:
+        return self.candidate is None
+
+
+class RuntimeRecoveryFlow:
+    """Точка входу відновлення під час роботи (``on_corruption`` для C3, Block C4).
+
+    Зупиняє звичайну роботу (вікна неактивні), показує наявний діалог «Дані
+    пошкоджено» з перевіреними копіями й передає ``on_choice`` вибрану копію або
+    скасування. Нічого не відновлює, не закриває й не відкриває базу: це C5.
+    Скасування не повертає до звичайної роботи — вікна лишаються неактивними.
+    """
+
+    def __init__(
+        self,
+        load_candidates: Callable[[], list[RestoreCandidate]],
+        on_choice: Callable[[RuntimeRecoveryChoice], None],
+    ) -> None:
+        self._load_candidates = load_candidates
+        self._on_choice = on_choice
+
+    def __call__(self, error: BaseException) -> None:
+        from budget.ui.dialogs.recovery_dialog import RecoveryDialog
+
+        _suspend_ui_for_recovery(error)
+        # Без батька: вимкнені вікна застосунку не вимикають сам діалог.
+        dialog = RecoveryDialog(None, load=self._load_candidates, restore=lambda c: c)
+        accepted = bool(dialog.exec())
+        choice = RuntimeRecoveryChoice(dialog.restored if accepted else None)
+        dialog.deleteLater()
+        if choice.cancelled:
+            log.info("Runtime recovery cancelled")
+        else:
+            log.info("Runtime recovery backup selected: %s", choice.candidate.backup.path.name)
+        self._on_choice(choice)
+
+
+def _await_runtime_restore(choice: RuntimeRecoveryChoice) -> None:
+    """Відновлення під час роботи ще не реалізоване (C5): вікна лишаються неактивними."""
 
 
 def restore_and_open(paths: DataPaths, clock: Clock, backup_path: Path) -> sqlite3.Connection:
@@ -304,7 +358,8 @@ def _run_gui(identity: ProductIdentity, paths: DataPaths, clock: Clock) -> int:
     exit_code, restored = start_session(identity, session, paths, clock)
     if exit_code is not None:
         return exit_code
-    guard = RuntimeCorruptionGuard(_suspend_ui_for_recovery)
+    recovery = RecoveryService(paths.database, paths.backups, clock)
+    guard = RuntimeCorruptionGuard(RuntimeRecoveryFlow(recovery.candidates, _await_runtime_restore))
     try:
         # Посилання тримає вікно живим до кінця циклу подій.
         window = show_window_or_report(identity, session, clock, paths, restored, guard)

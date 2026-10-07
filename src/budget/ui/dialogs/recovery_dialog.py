@@ -1,6 +1,7 @@
 """Діалог «Дані пошкоджено» (DS-6; ui-information-architecture.md, 10.1, 8).
 
-Пояснює, що застосунок нічого не записав і зберіг пошкоджений файл; показує
+Під час запуску пояснює, що застосунок нічого не записав і зберіг пошкоджений файл;
+під час роботи — що подальші зміни зупинено. Показує
 справні резервні копії від найновішої (дата й час, вид, розмір). «Відновити з
 вибраної копії» — лише після підтвердження «Поточні дані буде замінено даними
 копії від …». Невдача — повідомлення «Помилка» з причиною; діалог лишається
@@ -40,12 +41,27 @@ def confirmation_text(candidate: RestoreCandidate) -> str:
     return f"Поточні дані буде замінено даними копії від {format_moment(candidate.backup.created)}."
 
 
+STARTUP_EXPLANATION = (
+    "Під час запуску виявлено пошкодження даних. Застосунок нічого не записав у "
+    "пошкоджений файл і зберіг його як «{name}» у теці даних."
+)
+RUNTIME_EXPLANATION = (
+    "Під час роботи виявлено пошкодження даних. Подальші зміни зупинено, щоб нічого "
+    "не записати в пошкоджені дані. Оберіть резервну копію для відновлення."
+)
+
+
 class RecoveryDialog(QDialog):
-    """Вибір копії для відновлення. ``restore`` повертає відкриту відновлену базу."""
+    """Вибір копії для відновлення.
+
+    ``restore`` викликається з кандидатом із показаного переліку після підтвердження;
+    його результат зберігається в ``restored``. ``quarantined_name`` — назва збереженого
+    пошкодженого файлу під час запуску; ``None`` — пошкодження під час роботи.
+    """
 
     def __init__(
         self,
-        quarantined_name: str,
+        quarantined_name: str | None,
         load: Callable[[], list[RestoreCandidate]],
         restore: Callable[[RestoreCandidate], object],
         parent=None,
@@ -62,8 +78,9 @@ class RecoveryDialog(QDialog):
         layout.setSpacing(SPACING[4])
         layout.addWidget(text_label("Дані пошкоджено", "heading"))
         explanation = text_label(
-            "Під час запуску виявлено пошкодження даних. Застосунок нічого не записав у "
-            f"пошкоджений файл і зберіг його як «{quarantined_name}» у теці даних.",
+            RUNTIME_EXPLANATION
+            if quarantined_name is None
+            else STARTUP_EXPLANATION.format(name=quarantined_name),
             "body",
         )
         explanation.setWordWrap(True)
