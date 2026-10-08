@@ -6,6 +6,9 @@
 вибраної копії» — лише після підтвердження «Поточні дані буде замінено даними
 копії від …». Невдача — повідомлення «Помилка» з причиною; діалог лишається
 відкритим, щоб можна було вибрати іншу копію або закрити застосунок.
+
+Запуск без робочої бази, але з ознаками попередньої (R1): власне пояснення й окрема
+явна дія «Почати з порожніми даними» — лише після підтвердження, ніколи автоматично.
 """
 
 from collections.abc import Callable
@@ -45,6 +48,22 @@ STARTUP_EXPLANATION = (
     "Під час запуску виявлено пошкодження даних. Застосунок нічого не записав у "
     "пошкоджений файл і зберіг його як «{name}» у теці даних."
 )
+MISSING_DATABASE_EXPLANATION = (
+    "Основну базу даних не знайдено.\n\n"
+    "Застосунок виявив резервні копії або файли, що свідчать про попередній стан бази. "
+    "Щоб не втратити дані через автоматичне створення нової бази, запуск призупинено.\n\n"
+    "Виберіть резервну копію для відновлення або, якщо ви свідомо хочете почати без "
+    "попередніх даних, оберіть відповідну дію."
+)
+START_EMPTY = "Почати з порожніми даними"
+START_EMPTY_CONFIRMATION = (
+    "Основну базу даних не знайдено, але застосунок виявив ознаки попередньої бази або "
+    "резервні копії.\n\n"
+    "Якщо почати з порожніми даними, нова база буде створена без відновлення попередніх "
+    "даних.\n\n"
+    "Резервні копії та файли карантину не будуть видалені.\n\n"
+    "Продовжити?"
+)
 RUNTIME_EXPLANATION = (
     "Під час роботи виявлено пошкодження даних. Подальші зміни зупинено, щоб нічого "
     "не записати в пошкоджені дані. Пошкоджений файл збережено як «{name}» у теці даних. "
@@ -58,21 +77,27 @@ class RecoveryDialog(QDialog):
     ``restore`` викликається з кандидатом із показаного переліку після підтвердження;
     його результат зберігається в ``restored``. ``quarantined_name`` — назва збереженого
     пошкодженого файлу; ``runtime`` — пошкодження виявлено під час роботи, а не запуску.
+    ``quarantined_name=None`` — робочої бази немає взагалі (R1). ``start_empty`` — дія
+    «Почати з порожніми даними» (лише тоді є кнопка): після підтвердження й успіху
+    ``started_empty`` істинне; невдача — «Помилка», діалог лишається відкритим.
     """
 
     def __init__(
         self,
-        quarantined_name: str,
+        quarantined_name: str | None,
         load: Callable[[], list[RestoreCandidate]],
         restore: Callable[[RestoreCandidate], object],
         parent=None,
         *,
         runtime: bool = False,
+        start_empty: Callable[[], object] | None = None,
     ) -> None:
         super().__init__(parent)
         self._load = load
         self._restore = restore
+        self._start_empty = start_empty
         self.restored: object | None = None
+        self.started_empty = False
         self.setWindowTitle("Дані пошкоджено")
         # Фіксована ширина: висота тексту з переносами рахується від неї.
         self.setFixedWidth(560)
@@ -80,10 +105,13 @@ class RecoveryDialog(QDialog):
         layout.setContentsMargins(SPACING[5], SPACING[5], SPACING[5], SPACING[5])
         layout.setSpacing(SPACING[4])
         layout.addWidget(text_label("Дані пошкоджено", "heading"))
-        explanation = text_label(
-            (RUNTIME_EXPLANATION if runtime else STARTUP_EXPLANATION).format(name=quarantined_name),
-            "body",
-        )
+        if quarantined_name is None:
+            text = MISSING_DATABASE_EXPLANATION
+        else:
+            text = (RUNTIME_EXPLANATION if runtime else STARTUP_EXPLANATION).format(
+                name=quarantined_name
+            )
+        explanation = text_label(text, "body")
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         layout.addWidget(text_label("Резервні копії", "caption", muted=True))
@@ -102,6 +130,11 @@ class RecoveryDialog(QDialog):
         actions.addStretch(1)
         self.close_button = button("Закрити застосунок")
         self.close_button.clicked.connect(self.reject)
+        self.start_empty_button = None
+        if start_empty is not None:
+            self.start_empty_button = button(START_EMPTY)
+            self.start_empty_button.clicked.connect(self.start_empty_selected)
+            actions.addWidget(self.start_empty_button)
         self.restore_button = button("Відновити з вибраної копії", "primary")
         self.restore_button.clicked.connect(self.restore_selected)
         actions.addWidget(self.close_button)
@@ -139,6 +172,31 @@ class RecoveryDialog(QDialog):
         box.setDefaultButton(cancel)
         box.exec()
         return box.clickedButton() is confirm
+
+    def confirm_start_empty(self) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(START_EMPTY)
+        box.setText(START_EMPTY_CONFIRMATION)
+        cancel = box.addButton("Скасувати", QMessageBox.ButtonRole.RejectRole)
+        confirm = box.addButton(START_EMPTY, QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is confirm
+
+    def start_empty_selected(self) -> None:
+        """Лише явна дія з підтвердженням; невдача — «Помилка», нової бази немає."""
+        if self._start_empty is None or not self.confirm_start_empty():
+            return
+        self.failure.hide()
+        try:
+            self._start_empty()
+        except BudgetError as error:
+            self.failure.set_text(user_text(error))
+            self.failure.show()
+            return
+        self.started_empty = True
+        self.accept()
 
     def restore_selected(self) -> None:
         candidate = self.selected()

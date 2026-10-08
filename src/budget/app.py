@@ -20,7 +20,11 @@ from budget.services.backup import (
     RestoreCandidate,
     RestoreError,
 )
-from budget.services.startup import prepare_database
+from budget.services.startup import (
+    prepare_database,
+    set_aside_orphaned_files,
+    startup_recovery_indicators,
+)
 from budget.storage.database import close_without_checkpoint
 from budget.storage.integrity import corruption_code, quick_check
 
@@ -749,6 +753,12 @@ def show_window_with_recovery(
         restored = True
 
 
+DATA_DIRECTORY_UNKNOWN_MESSAGE = (
+    "Не вдалося безпечно визначити стан теки даних. Щоб не втратити дані, нову базу не "
+    "створено. Застосунок буде закритий."
+)
+
+
 def start_session(
     identity: ProductIdentity, session: ApplicationSession, paths: DataPaths, clock: Clock
 ) -> tuple[int | None, bool]:
@@ -757,7 +767,29 @@ def start_session(
     Повертає ``(код виходу, відновлено)``: код виходу — якщо продовжити неможливо,
     інакше ``None``; ``відновлено`` — базу відновлено з копії (DS-6). Відкритою
     лишається лише база, якою володіє ``session``.
+
+    Робочої бази немає, а є ознаки попередньої (R1, ``startup_recovery_indicators``) —
+    нова база не створюється: діалог відновлення без карантину (бази немає). Нова
+    порожня база — лише після явного «Почати з порожніми даними». Невідомий стан теки
+    даних (``OSError`` під час перевірки) — контрольований вихід без бази.
     """
+    try:
+        indicators = startup_recovery_indicators(paths.root, paths.database, paths.backups)
+    except OSError:
+        log.exception("Startup data directory inspection failed")
+        _show_message(identity.name, DATA_DIRECTORY_UNKNOWN_MESSAGE)
+        return EXIT_STARTUP_FAILED, False
+    if indicators:
+        log.warning(
+            "Database is missing; previous data found: %s", ", ".join(p.name for p in indicators)
+        )
+        recovered = _recover_missing_database(paths, clock)
+        if recovered is None:
+            return EXIT_DATA_CORRUPTED, False
+        if recovered.restored is not None:
+            session.adopt(recovered.restored)
+            return None, True
+        log.info("Starting with empty data by explicit choice; previous files are kept")
     try:
         session.open()
     except DatabaseCorruptedError as exc:
@@ -772,6 +804,37 @@ def start_session(
         _show_message(identity.name, exc.user_message)
         return EXIT_STARTUP_FAILED, False
     return None, False
+
+
+class _MissingDatabaseChoice:
+    """Рішення в діалозі запуску без бази: відновлене з'єднання або порожній старт."""
+
+    def __init__(self, restored: sqlite3.Connection | None) -> None:
+        self.restored = restored
+
+
+def _recover_missing_database(paths: DataPaths, clock: Clock) -> "_MissingDatabaseChoice | None":
+    """Робочої бази немає, а є ознаки попередньої (R1): той самий діалог і той самий
+    ``restore_and_open``, що й у Block B, але без карантину. «Почати з порожніми
+    даними» спершу відкладає залишкові ``-wal``/``-shm`` (``set_aside_orphaned_files``);
+    нову базу створює вже звичайний ``session.open()``. ``None`` — застосунок закрито.
+    """
+    from budget.ui.dialogs.recovery_dialog import RecoveryDialog
+
+    recovery = RecoveryService(paths.database, paths.backups, clock)
+    apply_theme()
+    dialog = RecoveryDialog(
+        None,
+        load=recovery.candidates,
+        restore=lambda candidate: restore_and_open(paths, clock, candidate.backup.path),
+        start_empty=lambda: set_aside_orphaned_files(paths.database, clock),
+    )
+    if not dialog.exec():
+        return None
+    if dialog.started_empty:
+        return _MissingDatabaseChoice(None)
+    log.info("Database restored from %s", dialog.selected().backup.path.name)
+    return _MissingDatabaseChoice(dialog.restored)
 
 
 def _recover_corrupted_database(
