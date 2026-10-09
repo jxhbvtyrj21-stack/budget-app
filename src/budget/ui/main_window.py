@@ -223,6 +223,9 @@ class MainWindow(QMainWindow):
         self._build_normal()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self.wizard is not None:
-            self.wizard.save_on_close()
+        # Незавершений майстер не зберігся — вікно не закривається: дані не втрачаються
+        # (IA 12), «Помилку» вже показано, закриття можна повторити.
+        if self.wizard is not None and not self.wizard.save_on_close():
+            event.ignore()
+            return
         super().closeEvent(event)

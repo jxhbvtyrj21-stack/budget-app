@@ -7,6 +7,8 @@
 """
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from typing import Any
@@ -23,6 +25,7 @@ from budget.domain.models import (
 )
 from budget.domain.money import Money, require_non_negative, require_positive
 from budget.errors import DomainRuleError
+from budget.services.read_errors import write_failure
 from budget.storage.repositories import (
     AccumulationRepository,
     DebtRepository,
@@ -121,6 +124,19 @@ class SetupDraft:
         )
 
 
+@contextmanager
+def _ordinary_write_failures() -> Iterator[None]:
+    """Звичайна помилка запису (``write_failure``) — ``DataWriteError`` для повідомлення
+    «Помилка» в майстрі; пошкодження бази й усе інше — той самий виняток далі (guard)."""
+    try:
+        yield
+    except sqlite3.OperationalError as error:
+        failure = write_failure(error)
+        if failure is None:
+            raise
+        raise failure from error
+
+
 class InitialSetupService:
     def __init__(self, connection: sqlite3.Connection, clock: Clock | None = None) -> None:
         self._connection = connection
@@ -142,15 +158,17 @@ class InitialSetupService:
     def save_draft(self, draft: SetupDraft | dict[str, Any]) -> None:
         """Зберігає незавершений стан майстра без строку дії (Q176, Q178)."""
         data = draft.to_dict() if isinstance(draft, SetupDraft) else draft
-        self._ensure_not_completed()
-        with transaction(self._connection):
-            self._repository.save_draft(data)
+        with _ordinary_write_failures():
+            self._ensure_not_completed()
+            with transaction(self._connection):
+                self._repository.save_draft(data)
 
     def reset(self) -> None:
         """Повністю скидає незавершений майстер (Q179); фінансових записів не створює."""
-        self._ensure_not_completed()
-        with transaction(self._connection):
-            self._repository.clear_draft()
+        with _ordinary_write_failures():
+            self._ensure_not_completed()
+            with transaction(self._connection):
+                self._repository.clear_draft()
 
     def complete(self, draft: SetupDraft) -> None:
         """Атомарно створює стартовий стан і завершує налаштування (ADR 0010, Q172).
@@ -165,7 +183,8 @@ class InitialSetupService:
         accumulations = AccumulationRepository(self._connection)
         debts = DebtRepository(self._connection)
         remainder = GeneralRemainderRepository(self._connection)
-        with transaction(self._connection):
+        # Транзакція відкочується всередині; звичайна помилка запису — ``DataWriteError``.
+        with _ordinary_write_failures(), transaction(self._connection):
             # Повторна перевірка всередині транзакції: дублікатів стартового стану немає.
             if self._repository.get().status is SetupStatus.COMPLETED:
                 raise DomainRuleError("Первинне налаштування вже завершено.")

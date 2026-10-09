@@ -2,8 +2,14 @@
 
 Кроки: вітання, наявні кошти, накопичення, борги, перевірка. Чернетка зберігається
 під час переходу між кроками й під час закриття вікна (Q176, Q178).
+
+Помилка збереження (IA 12): кожна дія спершу зберігає змінену копію чернетки
+(candidate) і лише після успіху робить її поточною й оновлює вікно. Невдача —
+«Помилка», а показаний крок, чернетка, поля й перелік лишаються узгодженими й
+незмінними, тож дію можна повторити.
 """
 
+import logging
 from dataclasses import replace
 
 from PySide6.QtCore import Signal
@@ -17,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from budget.domain.money import Money
-from budget.errors import BudgetError, ValidationError
+from budget.errors import BudgetError, DataWriteError, ValidationError
 from budget.services.setup import (
     InitialAccumulation,
     InitialDebt,
@@ -39,6 +45,17 @@ STEP_TITLES = {
     SetupStep.REVIEW: "Перевірка",
 }
 CAN_SKIP = "Можна пропустити."  # кроки 3–4 без записів (IA 12)
+SAVE_FAILED_TITLE = "Помилка"
+SAVE_FAILED = (
+    "Не вдалося зберегти зміни майстра. Введені значення залишилися в майстрі, тож дію "
+    "можна повторити."
+)
+CLOSE_SAVE_FAILED = (
+    "Не вдалося зберегти незавершене налаштування, тому вікно не закрито. Введені значення "
+    "залишилися в майстрі — спробуйте закрити ще раз."
+)
+
+log = logging.getLogger(__name__)
 
 
 class SetupWizardPage(Page):
@@ -163,25 +180,31 @@ class SetupWizardPage(Page):
     # Дії -------------------------------------------------------------------------------
 
     def go_to(self, step: int) -> None:
-        step = SetupStep(max(SetupStep.WELCOME, min(SetupStep.REVIEW, step)))
-        self.draft = replace(self.draft, step=step)
-        self._save()
-        self._show(step)
+        self._move(self.draft, step)
 
     def _next(self) -> None:
-        if self.draft.step is SetupStep.GENERAL_REMAINDER and not self._read_remainder():
-            return
-        self.go_to(self.draft.step + 1)
+        candidate = self.draft
+        if self.draft.step is SetupStep.GENERAL_REMAINDER:
+            amount = self._read_remainder()
+            if amount is None:
+                return
+            candidate = replace(candidate, general_remainder=amount)
+        self._move(candidate, self.draft.step + 1)
 
-    def _read_remainder(self) -> bool:
+    def _move(self, candidate: SetupDraft, step: int) -> None:
+        """Крок змінюється лише після збереження чернетки з цим кроком."""
+        step = SetupStep(max(SetupStep.WELCOME, min(SetupStep.REVIEW, step)))
+        if self._save(replace(candidate, step=step)):
+            self._show(step)
+
+    def _read_remainder(self) -> Money | None:
         try:
             amount = parse_money_input(self.remainder_input.text()) or Money.zero()
-            self.draft = replace(self.draft, general_remainder=amount)
         except ValidationError as error:
             self.remainder_field.set_error(error.user_message)
-            return False
+            return None
         self.remainder_field.set_error(None)
-        return True
+        return amount
 
     def add_accumulation(self) -> None:
         fields = (self.acc_name, self.acc_description, self.acc_balance, self.acc_target)
@@ -204,10 +227,10 @@ class SetupWizardPage(Page):
         except ValidationError as error:
             self.acc_name.set_error(error.user_message)
             return
-        self.draft = replace(self.draft, accumulations=(*self.draft.accumulations, item))
+        if not self._save(replace(self.draft, accumulations=(*self.draft.accumulations, item))):
+            return  # поля лишаються заповненими
         for field in fields:
             field.field.clear()
-        self._save()
         self._render_lists()
 
     def add_debt(self) -> None:
@@ -225,36 +248,43 @@ class SetupWizardPage(Page):
             )
             target.set_error(error.user_message)
             return
-        self.draft = replace(self.draft, debts=(*self.draft.debts, item))
+        if not self._save(replace(self.draft, debts=(*self.draft.debts, item))):
+            return  # поля лишаються заповненими
         for field in fields:
             field.field.clear()
-        self._save()
         self._render_lists()
 
     def remove_accumulation(self, index: int) -> None:
         items = list(self.draft.accumulations)
         del items[index]
-        self.draft = replace(self.draft, accumulations=tuple(items))
-        self._save()
-        self._render_lists()
+        if self._save(replace(self.draft, accumulations=tuple(items))):
+            self._render_lists()
 
     def remove_debt(self, index: int) -> None:
         items = list(self.draft.debts)
         del items[index]
-        self.draft = replace(self.draft, debts=tuple(items))
-        self._save()
-        self._render_lists()
+        if self._save(replace(self.draft, debts=tuple(items))):
+            self._render_lists()
 
     def finish(self) -> None:
         try:
             self._setup.complete(self.draft)
+        except DataWriteError:
+            log.warning("Initial setup was not completed", exc_info=True)
+            QMessageBox.warning(self, SAVE_FAILED_TITLE, SAVE_FAILED)
+            return
         except BudgetError as error:
             QMessageBox.warning(self, "Помилка", error.user_message)
             return
         self.completed.emit()
 
     def reset(self) -> None:
-        self._setup.reset()
+        """Чернетка стає порожньою лише після збереження скинутого стану."""
+        try:
+            self._setup.reset()
+        except BudgetError as error:
+            self._report(error, SAVE_FAILED)
+            return
         self.draft = SetupDraft()
         self.remainder_input.clear()
         self._show(self.draft.step)
@@ -270,14 +300,33 @@ class SetupWizardPage(Page):
         if answer == QMessageBox.StandardButton.Reset:
             self.reset()
 
-    def save_on_close(self) -> None:
-        self._read_remainder()
-        self._save()
+    def save_on_close(self) -> bool:
+        """``False`` — не збережено (показано «Помилка»): вікно закривати не можна."""
+        candidate = self.draft
+        amount = self._read_remainder()
+        if amount is not None:
+            candidate = replace(candidate, general_remainder=amount)
+        return self._save(candidate, CLOSE_SAVE_FAILED)
 
     # Відображення ----------------------------------------------------------------------
 
-    def _save(self) -> None:
-        self._setup.save_draft(self.draft)
+    def _save(self, candidate: SetupDraft, failure_text: str = SAVE_FAILED) -> bool:
+        """Зберігає ``candidate`` і лише після успіху робить його поточною чернеткою.
+        Пошкодження бази тут не перехоплюється — воно йде до guard."""
+        try:
+            self._setup.save_draft(candidate)
+        except BudgetError as error:
+            self._report(error, failure_text)
+            return False
+        self.draft = candidate
+        return True
+
+    def _report(self, error: BudgetError, failure_text: str) -> None:
+        if isinstance(error, DataWriteError):
+            log.warning("Setup draft was not saved", exc_info=True)
+            QMessageBox.warning(self, SAVE_FAILED_TITLE, failure_text)
+        else:
+            QMessageBox.warning(self, SAVE_FAILED_TITLE, error.user_message)
 
     def _show(self, step: SetupStep) -> None:
         self.steps.setCurrentIndex(step - 1)

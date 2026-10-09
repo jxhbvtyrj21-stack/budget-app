@@ -42,6 +42,13 @@ class DataReadError(StorageError):
     default_message = "Не вдалося прочитати дані."
 
 
+class DataWriteError(StorageError):
+    """Звичайна (не пошкодження) помилка запису: зміни не збережено. Створює її лише
+    ``services.read_errors.write_failure``; пошкодження бази нею ніколи не стає."""
+
+    default_message = "Не вдалося зберегти дані."
+
+
 class DatabaseCorruptedError(StorageError):
     """База даних пошкоджена; застосунок не повинен у неї писати (DS-6)."""
 
