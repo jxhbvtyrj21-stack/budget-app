@@ -1,5 +1,7 @@
 """Діалог «Дані пошкоджено» і шлях запуску з пошкодженою базою (DS-6; IA 10.1)."""
 
+import errno
+import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -13,8 +15,10 @@ from budget.errors import DatabaseCorruptedError, StorageError
 from budget.platform.identity import load_product_identity
 from budget.platform.paths import DataPaths
 from budget.services.backup import (
+    BACKUPS_UNREADABLE_MESSAGE,
     BackupKind,
     BackupService,
+    RecoveryService,
     RestoreError,
     find_backups,
     restore_candidates,
@@ -200,3 +204,51 @@ def test_failed_quarantine_shows_message(qtbot, paths, clock, candidates, monkey
     monkeypatch.setattr(app_module.RecoveryService, "quarantine_corrupted", locked)
     assert run_recovery(paths, clock) is None
     assert messages == [DatabaseCorruptedError.default_message]
+
+
+# Перелік копій не прочитано (F9) -----------------------------------------------------------
+
+
+def unreadable_backups(monkeypatch, backups_dir):
+    original = os.scandir
+
+    def scandir(path="."):
+        if os.fspath(path) == os.fspath(backups_dir):
+            raise PermissionError(errno.EACCES, "доступ заборонено", os.fspath(path))
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+
+
+@pytest.mark.parametrize("mode", ["missing", "startup", "runtime"])
+def test_unreadable_backup_list_is_an_error_not_no_backups(
+    qtbot, tmp_path, clock, monkeypatch, mode
+):
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+    (backups_dir / "budget-20261005-120000-daily.db").write_bytes(b"copy")
+    unreadable_backups(monkeypatch, backups_dir)
+    recovery = RecoveryService(tmp_path / "budget.db", backups_dir, clock)
+    restore_calls = []
+    if mode == "missing":
+        dialog = RecoveryDialog(
+            None, recovery.candidates, restore_calls.append, start_empty=lambda: None
+        )
+    else:
+        dialog = RecoveryDialog(
+            "budget.db.corrupted-x",
+            recovery.candidates,
+            restore_calls.append,
+            runtime=mode == "runtime",
+        )  # створюється без винятку
+    qtbot.addWidget(dialog)
+    assert not dialog.failure.isHidden()
+    assert dialog.failure.body.text() == BACKUPS_UNREADABLE_MESSAGE
+    assert dialog.empty.isHidden()  # не «Справних резервних копій немає.»
+    assert dialog.list.isHidden() and dialog.list.count() == 0
+    assert not dialog.restore_button.isEnabled() and dialog.selected() is None
+    dialog.restore_selected()  # відновлювати нічого
+    assert restore_calls == [] and dialog.result() == 0
+    assert dialog.close_button.isEnabled()
+    if mode == "missing":
+        assert dialog.start_empty_button.isEnabled()  # інші дії — без змін

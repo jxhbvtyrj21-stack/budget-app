@@ -59,6 +59,7 @@ class ServicePage(Page):
         super().__init__("Сервіс")
         self._backups = backups
         self.candidates: list[RestoreCandidate] = []
+        self._list_unreadable = False  # «Помилка» зараз — про перелік копій
 
         panel = Panel()
         panel.body.addWidget(text_label("Резервні копії", "heading"))
@@ -102,7 +103,22 @@ class ServicePage(Page):
         self.refresh()
 
     def refresh(self) -> None:
-        self.candidates = self._backups.candidates()
+        """Перелік справних копій. Перелік не прочитано (``BudgetError``) — «Помилка» з
+        причиною замість «Резервних копій ще немає»; відновлювати нічого. Коли перелік
+        знову прочитано, ця «Помилка» зникає; інші повідомлення не зачіпаються."""
+        try:
+            self.candidates = self._backups.candidates()
+        except BudgetError as error:
+            log.exception("Backup list could not be read")
+            self.failure.set_text(user_text(error))
+            self.failure.show()
+            self.candidates = []
+            unavailable = True
+        else:
+            unavailable = False
+            if self._list_unreadable:
+                self.failure.hide()
+        self._list_unreadable = unavailable
         self.table.setRowCount(len(self.candidates))
         for row, candidate in enumerate(self.candidates):
             backup = candidate.backup
@@ -115,7 +131,7 @@ class ServicePage(Page):
                 self.table.setItem(row, column, QTableWidgetItem(text))
         has_rows = bool(self.candidates)
         self.table.setVisible(has_rows)
-        self.empty.setVisible(not has_rows)
+        self.empty.setVisible(not unavailable and not has_rows)
         if has_rows:
             self.table.selectRow(0)  # найновіша справна копія
         self.restore_button.setEnabled(has_rows)
@@ -144,6 +160,7 @@ class ServicePage(Page):
 
     def show_failure(self, text: str) -> None:
         """«Помилка» з причиною (IA 12) — для невдалого відновлення з копії."""
+        self._list_unreadable = False
         self.failure.set_text(text)
         self.failure.show()
 
@@ -153,6 +170,7 @@ class ServicePage(Page):
             self._backups.create_backup(BackupKind.ON_DEMAND)
         except BudgetError as error:
             log.exception("On-demand backup failed")
+            self._list_unreadable = False
             self.failure.set_text(f"{BACKUP_FAILED} {user_text(error)}")
             self.failure.show()
             return

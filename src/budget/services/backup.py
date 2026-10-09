@@ -6,6 +6,7 @@
 """
 
 import logging
+import os
 import re
 import sqlite3
 from collections.abc import Callable, Hashable
@@ -32,6 +33,7 @@ from budget.storage.recovery import (
 log = logging.getLogger(__name__)
 
 BACKUP_SUFFIX = ".db"
+BACKUPS_UNREADABLE_MESSAGE = "Не вдалося прочитати теку резервних копій."
 _TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 _NAME_PATTERN = re.compile(
     r"^budget-(?P<stamp>\d{8}-\d{6})-(?P<kind>daily|weekly|monthly|on-demand|before-restore"
@@ -89,11 +91,22 @@ def newest_first(backups: list[BackupInfo]) -> list[BackupInfo]:
 
 
 def find_backups(backups_dir: Path) -> list[BackupInfo]:
-    """Розпізнані за назвою копії від найновішої; нерозпізнані файли не враховуються."""
+    """Розпізнані за назвою копії від найновішої; нерозпізнані файли не враховуються.
+
+    Теки копій немає — ``[]``. Будь-яка інша ``OSError`` (читання теки чи перевірка
+    запису) іде далі: невідомий стан не означає, що копій немає, а частковий перелік не
+    видається за повний. Тому ``os.scandir``, а не ``Path.glob``: той мовчки ковтає
+    помилки читання теки.
+    """
     if not backups_dir.is_dir():
         return []
-    found = (parse_backup_name(p) for p in backups_dir.glob(f"budget-*{BACKUP_SUFFIX}"))
-    return newest_first([b for b in found if b is not None and b.path.is_file()])
+    found = []
+    with os.scandir(backups_dir) as entries:
+        for entry in entries:
+            backup = parse_backup_name(Path(entry.path))
+            if backup is not None and entry.is_file():
+                found.append(backup)
+    return newest_first(found)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,8 +123,14 @@ def restore_candidates(backups_dir: Path) -> list[RestoreCandidate]:
     Кожна копія відкривається лише для читання й проходить ``integrity_check``;
     пошкоджені не пропонуються. Нічого не видаляється й не змінюється.
     """
+    try:
+        backups = find_backups(backups_dir)
+    except OSError as exc:
+        raise StorageError(
+            BACKUPS_UNREADABLE_MESSAGE, detail=f"Перелік копій {backups_dir}: {exc}"
+        ) from exc
     candidates = []
-    for backup in find_backups(backups_dir):
+    for backup in backups:
         if not verify_backup(backup.path):
             log.warning("Копія %s не пройшла перевірку й не пропонується", backup.path.name)
             continue
@@ -184,6 +203,9 @@ class BackupService:
         пулу. Звичайна помилка копіювання (напр., бракує місця на диску) записується в
         журнал і не зупиняє запуск: ротація цього пулу не виконується, наявні копії
         лишаються. Пошкодження вихідної бази (``DatabaseCorruptedError``) пробрасується.
+        Перелік копій не прочитано (``OSError``) — так само в журнал: невідомий стан теки
+        не є «копій немає», тож ні нової копії, ні ротації за ним (якщо збій лише під час
+        ротації — уже створена копія лишається, ротацію пропущено).
         """
         created = []
         for policy in AUTOMATIC_POLICIES:
@@ -193,6 +215,9 @@ class BackupService:
                 raise
             except StorageError:
                 log.exception("Автоматична копія «%s» не створена", policy.kind.value)
+                continue
+            except OSError:
+                log.exception("Перелік копій не прочитано; «%s» пропущено", policy.kind.value)
                 continue
             if path is not None:
                 created.append(path)

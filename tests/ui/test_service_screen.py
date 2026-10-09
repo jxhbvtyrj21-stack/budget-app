@@ -1,7 +1,9 @@
 """Екран «Сервіс»: таблиця, копія на вимогу й «Про програму» (IA 8, 12; design-system.md 6.5)."""
 
+import errno
 import inspect
 import logging
+import os
 import sys
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version as package_version
@@ -16,7 +18,12 @@ from budget.domain.money import Money
 from budget.errors import DatabaseCorruptedError, StorageError
 from budget.platform.identity import load_product_identity
 from budget.platform.paths import DataPaths
-from budget.services.backup import BackupKind, BackupService, find_backups
+from budget.services.backup import (
+    BACKUPS_UNREADABLE_MESSAGE,
+    BackupKind,
+    BackupService,
+    find_backups,
+)
 from budget.services.facade import AppServices
 from budget.services.setup import SetupDraft
 from budget.ui.dialogs.recovery_dialog import RecoveryDialog
@@ -310,3 +317,57 @@ def test_about_shows_product_name_and_package_version(window):
 def test_about_has_no_hardcoded_version():
     source = inspect.getsource(service_module)
     assert package_version("budget") not in source
+
+
+# Перелік копій не прочитано (F9) -----------------------------------------------------------
+
+
+def unreadable_backups(monkeypatch, backups_dir):
+    original = os.scandir
+
+    def scandir(path="."):
+        if os.fspath(path) == os.fspath(backups_dir):
+            raise PermissionError(errno.EACCES, "доступ заборонено", os.fspath(path))
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+
+
+def service_page(qtbot, connection, paths, clock) -> ServicePage:
+    page = ServicePage(BackupService(connection, paths.backups, clock), "Budget")
+    qtbot.addWidget(page)
+    return page
+
+
+def test_unreadable_backup_list_shows_an_error_not_no_backups(
+    qtbot, connection, paths, clock, monkeypatch
+):
+    unreadable_backups(monkeypatch, paths.backups)
+    page = service_page(qtbot, connection, paths, clock)  # створюється без винятку
+    assert not page.failure.isHidden()
+    assert page.failure.body.text() == BACKUPS_UNREADABLE_MESSAGE
+    assert page.empty.isHidden()  # не «Резервних копій ще немає»
+    assert page.table.isHidden() and page.table.rowCount() == 0
+    assert not page.restore_button.isEnabled() and page.selected() is None
+    assert page.create_button.isEnabled()
+
+
+def test_list_error_disappears_when_the_list_is_read_again(
+    qtbot, connection, paths, clock, monkeypatch
+):
+    unreadable_backups(monkeypatch, paths.backups)
+    page = service_page(qtbot, connection, paths, clock)
+    monkeypatch.undo()
+    page.refresh()  # напр., повторне відкриття екрана
+    assert page.failure.isHidden()
+    assert len(rows(page)) == 3 and page.restore_button.isEnabled()
+
+
+def test_list_refresh_keeps_other_error_messages(qtbot, connection, paths, clock, monkeypatch):
+    unreadable_backups(monkeypatch, paths.backups)
+    page = service_page(qtbot, connection, paths, clock)
+    page.show_failure("Не вдалося відновити дані з вибраної копії.")
+    monkeypatch.undo()
+    page.refresh()
+    assert not page.failure.isHidden()
+    assert page.failure.body.text() == "Не вдалося відновити дані з вибраної копії."

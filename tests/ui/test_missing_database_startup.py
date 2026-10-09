@@ -692,6 +692,34 @@ def test_unreadable_data_directory_stops_without_a_database(
     assert watch["migrate"] == watch["automatic"] == []
 
 
+def test_backup_list_failing_after_the_precheck_stops_without_a_database(
+    qtbot, paths, clock, monkeypatch, watch, messages
+):
+    """F9: попередня перевірка ``backups/`` пройшла, а читання переліку копій — ні. Це не
+    «ознак немає»: контрольований вихід без нової порожньої бази."""
+    paths.backups.mkdir(parents=True)
+    (paths.backups / "budget-20261005-120000-daily.db").write_bytes(b"copy")  # єдина ознака
+    original = os.scandir
+    calls = []
+
+    def scandir(path="."):
+        if os.fspath(path) == os.fspath(paths.backups):
+            calls.append(path)
+            if len(calls) > 1:  # перша — попередня перевірка, друга — сам перелік
+                raise PermissionError(13, "доступ заборонено", os.fspath(path))
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    dialogs = Dialogs(monkeypatch, lambda d: pytest.fail("діалогу не має бути"))
+    watch["reset"]()
+    session, result = launch(paths, clock)
+    assert len(calls) == 2
+    assert result == (EXIT_STARTUP_FAILED, False) and not session.is_open
+    assert messages == [DATA_DIRECTORY_UNKNOWN_MESSAGE] and dialogs.shown == []
+    assert not paths.database.exists() and not watch["database_opened"]()
+    assert watch["migrate"] == watch["automatic"] == []
+
+
 # T16. Windows: залишковий -wal заблоковано іншим процесом ----------------------------------------
 
 

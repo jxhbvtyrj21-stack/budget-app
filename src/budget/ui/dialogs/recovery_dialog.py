@@ -149,14 +149,22 @@ class RecoveryDialog(QDialog):
         self.reload()
 
     def reload(self) -> None:
+        """Перелік справних копій. Перелік не прочитано (``BudgetError``) — «Помилка» з
+        причиною замість «копій немає»; відновлювати нічого, інші дії без змін."""
         self.list.clear()
-        for candidate in self._load():
+        try:
+            candidates = self._load()
+        except BudgetError as error:
+            self.failure.set_text(user_text(error))
+            self.failure.show()
+            candidates = None
+        for candidate in candidates or []:
             item = QListWidgetItem(candidate_text(candidate))
             item.setData(Qt.ItemDataRole.UserRole, candidate)
             self.list.addItem(item)
         has_candidates = self.list.count() > 0
         self.list.setVisible(has_candidates)
-        self.empty.setVisible(not has_candidates)
+        self.empty.setVisible(candidates is not None and not has_candidates)
         if has_candidates:
             self.list.setCurrentRow(0)  # найновіша справна копія (DS-6)
         self._update_actions()
