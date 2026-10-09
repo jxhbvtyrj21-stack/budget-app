@@ -41,3 +41,4 @@ uv run python -m budget     # запуск застосунку
 - [`docs/decisions/`](docs/decisions/) — журнал архітектурних рішень (ADR).
 - [`docs/design/design-system.md`](docs/design/design-system.md) — дизайн-система першого релізу.
 - [`docs/design/ui-information-architecture.md`](docs/design/ui-information-architecture.md) — інформаційна архітектура інтерфейсу: екрани, навігація, форми, стани.
+- [`docs/audits/recovery-audit-findings.md`](docs/audits/recovery-audit-findings.md) — відкриті знахідки аудитів відновлення (R1.1, R1.2) і рекомендований порядок робіт.
