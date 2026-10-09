@@ -111,8 +111,15 @@ def verify_backup(backup_path: Path) -> bool:
 
 
 def discard_database(database_path: Path) -> None:
-    """Видаляє файл бази разом із ``-wal``/``-shm`` (лише для власних тимчасових файлів)."""
-    for path in database_files(database_path):
+    """Видаляє файл бази разом із ``-wal``/``-shm`` і журналом відкату ``-journal`` (лише
+    для власних тимчасових файлів).
+
+    Журнал відкату без своєї бази не може бути використаний для її відновлення, тож іде
+    разом із нею. Основний файл видаляється першим, журнал — останнім: якщо основний
+    файл видалити не вдалося, ``OSError`` іде далі, а журнал лишається на місці.
+    """
+    journal = database_path.with_name(database_path.name + "-journal")
+    for path in [*database_files(database_path), journal]:
         path.unlink(missing_ok=True)
 
 

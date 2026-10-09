@@ -2,6 +2,7 @@
 
 import hashlib
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,10 +12,13 @@ from budget.errors import StorageError
 from budget.storage import migrations
 from budget.storage.backup import backup_database
 from budget.storage.database import open_database
+from budget.storage.integrity import integrity_check
 from budget.storage.migrations import migrate
 from budget.storage.recovery import (
     database_files,
+    discard_database,
     quarantine_database,
+    restore_from_backup,
     set_aside_database,
     verify_backup,
 )
@@ -154,5 +158,89 @@ def test_quarantine_of_open_database_fails_cleanly_on_windows(folder):
         with pytest.raises(StorageError):
             quarantine_database(path, "20261006-120000")
         assert path.exists()
+    finally:
+        connection.close()
+
+
+# Видалення тимчасової бази разом із журналом відкату (F12) ---------------------------------
+
+
+def side_files(path: Path) -> list[Path]:
+    """Основний файл, -wal, -shm і -journal — у порядку, в якому їх видаляють."""
+    return [*database_files(path), path.with_name(path.name + "-journal")]
+
+
+def restoring_leftovers(folder: Path) -> list[str]:
+    return sorted(p.name for p in folder.iterdir() if p.name.startswith("budget.db.restoring"))
+
+
+def test_discard_removes_database_wal_shm_and_journal(folder):
+    database = folder / "ledger.sqlite"  # шлях до журналу — від переданої назви
+    for path in side_files(database):
+        path.write_bytes(b"x")
+    neighbour = folder / "budget.db-journal"  # журнал іншої бази не чіпати
+    neighbour.write_bytes(b"x")
+    discard_database(database)
+    assert not any(p.exists() for p in side_files(database))
+    assert neighbour.exists()
+
+
+def test_failed_restore_leaves_no_orphan_journal(folder):
+    """F12: після аварії лишилися ``.restoring`` і ``.restoring-journal``; наступна спроба
+    прибирає тимчасову базу й падає, бо копію не відкрити. Журнал не лишається сиротою."""
+    (folder / "budget.db.restoring").write_bytes(b"partial copy")
+    (folder / "budget.db.restoring-journal").write_bytes(b"x" * 512)
+    with pytest.raises(StorageError):
+        restore_from_backup(folder / "немає такої копії.db", folder / "budget.db")
+    assert restoring_leftovers(folder) == []
+    assert not (folder / "budget.db").exists()
+
+
+def test_journal_stays_when_the_database_cannot_be_removed(folder, monkeypatch):
+    database = folder / "budget.db.restoring"
+    files = side_files(database)
+    for path in files:
+        path.write_bytes(b"x")
+    attempts = []
+    original = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        attempts.append(self)
+        if self == database:
+            raise PermissionError(13, "файл зайнятий", str(self))
+        return original(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(PermissionError):
+        discard_database(database)
+    assert attempts == [database]  # після невдачі з основним файлом — нічого
+    assert all(p.exists() for p in files)  # журнал і -wal/-shm на місці
+
+
+CRASH_WHILE_WRITING = """
+import os, sqlite3, sys
+connection = sqlite3.connect(sys.argv[1], isolation_level=None)
+connection.execute("PRAGMA cache_size = 1")
+connection.execute("BEGIN IMMEDIATE")
+connection.execute("CREATE TABLE junk (x)")
+connection.executemany("INSERT INTO junk VALUES (?)", [(os.urandom(900),)] * 300)
+os._exit(9)  # аварія посеред транзакції: без COMMIT і без закриття
+"""
+
+
+def test_restore_after_a_crash_with_a_hot_journal(folder):
+    """Аварія посеред запису в тимчасову базу лишає справжній журнал SQLite; наступне
+    відновлення все одно дає цілу базу з даними копії й без залишків."""
+    backup = make_backup(folder)
+    temporary = folder / "budget.db.restoring"
+    crashed = subprocess.run([sys.executable, "-c", CRASH_WHILE_WRITING, str(temporary)])
+    assert crashed.returncode == 9
+    assert (folder / "budget.db.restoring-journal").exists()  # передумова: журнал лишився
+    restore_from_backup(backup, folder / "budget.db")
+    assert restoring_leftovers(folder) == []
+    connection = sqlite3.connect(folder / "budget.db")
+    try:
+        assert integrity_check(connection)
+        assert connection.execute("SELECT balance FROM general_remainder").fetchone() == (700,)
     finally:
         connection.close()
