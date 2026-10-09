@@ -1,4 +1,5 @@
-"""Діалог «Дані пошкоджено» (DS-6; ui-information-architecture.md, 10.1, 8).
+"""Діалог відновлення (DS-6; ui-information-architecture.md, 10.1, 8): «Дані пошкоджено»
+або, якщо робочої бази немає взагалі, «Базу даних не знайдено».
 
 Пояснює, що застосунок нічого не записав і зберіг пошкоджений файл (під час запуску
 чи під час роботи — тоді ще й що подальші зміни зупинено). Показує
@@ -7,8 +8,9 @@
 копії від …». Невдача — повідомлення «Помилка» з причиною; діалог лишається
 відкритим, щоб можна було вибрати іншу копію або закрити застосунок.
 
-Запуск без робочої бази, але з ознаками попередньої (R1): власне пояснення й окрема
-явна дія «Почати з порожніми даними» — лише після підтвердження, ніколи автоматично.
+Запуск без робочої бази, але з ознаками попередньої (R1): заголовок «Базу даних не
+знайдено», власне пояснення й окрема явна дія «Почати з порожніми даними» — лише після
+підтвердження, ніколи автоматично.
 """
 
 from collections.abc import Callable
@@ -30,6 +32,9 @@ from budget.ui.components.forms import Notice
 from budget.ui.formatting import format_backup_kind, format_moment, format_size
 from budget.ui.messages import user_text
 from budget.ui.theme.tokens import SPACING
+
+CORRUPTED_TITLE = "Дані пошкоджено"
+MISSING_DATABASE_TITLE = "Базу даних не знайдено"
 
 
 def candidate_text(candidate: RestoreCandidate) -> str:
@@ -98,13 +103,14 @@ class RecoveryDialog(QDialog):
         self._start_empty = start_empty
         self.restored: object | None = None
         self.started_empty = False
-        self.setWindowTitle("Дані пошкоджено")
+        title = MISSING_DATABASE_TITLE if quarantined_name is None else CORRUPTED_TITLE
+        self.setWindowTitle(title)
         # Фіксована ширина: висота тексту з переносами рахується від неї.
         self.setFixedWidth(560)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACING[5], SPACING[5], SPACING[5], SPACING[5])
         layout.setSpacing(SPACING[4])
-        layout.addWidget(text_label("Дані пошкоджено", "heading"))
+        layout.addWidget(text_label(title, "heading"))
         if quarantined_name is None:
             text = MISSING_DATABASE_EXPLANATION
         else:

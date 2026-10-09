@@ -151,6 +151,7 @@ class Dialogs:
             recorder.shown.append(
                 {
                     "mode": dialog_mode(texts),
+                    "title": (dialog.windowTitle(), headings(dialog)),
                     "start_empty": dialog.start_empty_button is not None,
                     "candidates": dialog.list.count(),
                     "empty_visible": not dialog.empty.isHidden(),
@@ -159,6 +160,15 @@ class Dialogs:
             return recorder.action(dialog)
 
         monkeypatch.setattr(RecoveryDialog, "exec", exec_)
+
+
+def headings(dialog) -> list[str]:
+    """Тексти верхнього рядка діалогу (роль ``heading``)."""
+    return [
+        label.text()
+        for label in dialog.findChildren(type(dialog.empty))
+        if label.property("textRole") == "heading"
+    ]
 
 
 def dialog_mode(texts: list[str]) -> str:
@@ -264,11 +274,13 @@ def test_next_launch_after_startup_recovery_cancel(qtbot, paths, clock, monkeypa
     assert first == (EXIT_DATA_CORRUPTED, False)
     assert dialogs.shown[0]["mode"] == "startup"
     assert dialogs.shown[0]["start_empty"] is False  # чинний діалог B без нової дії
+    assert dialogs.shown[0]["title"] == ("Дані пошкоджено", ["Дані пошкоджено"])
     before = files(paths.root)
     watch["reset"]()
     session, result = launch(paths, clock)  # наступний запуск
     assert result == (EXIT_DATA_CORRUPTED, False) and not session.is_open
     assert dialogs.shown[1]["mode"] == "missing"
+    assert dialogs.shown[1]["title"] == ("Базу даних не знайдено", ["Базу даних не знайдено"])
     assert not paths.database.exists() and files(paths.root) == before
     assert not watch["database_opened"]()
     assert watch["migrate"] == watch["automatic"] == watch["rotate"] == watch["quarantine"] == []
@@ -594,6 +606,38 @@ def test_start_empty_button_only_in_the_missing_database_dialog(qtbot):
     texts = [label.text() for label in missing.findChildren(type(missing.empty))]
     assert MISSING_DATABASE_EXPLANATION in texts
     assert not any("зберіг його як" in t or "збережено як" in t for t in texts)
+
+
+@pytest.mark.parametrize(
+    ("mode", "title", "explanation"),
+    [
+        pytest.param(
+            "missing", "Базу даних не знайдено", MISSING_DATABASE_EXPLANATION, id="missing"
+        ),
+        pytest.param(
+            "startup", "Дані пошкоджено", STARTUP_EXPLANATION.format(name="x"), id="startup"
+        ),
+        pytest.param(
+            "runtime", "Дані пошкоджено", RUNTIME_EXPLANATION.format(name="x"), id="runtime"
+        ),
+    ],
+)
+def test_dialog_title_matches_the_mode(qtbot, mode, title, explanation):
+    """F11: заголовок вікна й верхній рядок — за режимом; пояснення й кнопки ті самі."""
+    if mode == "missing":
+        dialog = RecoveryDialog(None, lambda: [], lambda c: c, start_empty=lambda: None)
+    else:
+        dialog = RecoveryDialog("x", lambda: [], lambda c: c, runtime=mode == "runtime")
+    qtbot.addWidget(dialog)
+    assert dialog.windowTitle() == title
+    assert headings(dialog) == [title]
+    texts = [label.text() for label in dialog.findChildren(type(dialog.empty))]
+    assert explanation in texts
+    if mode == "missing":
+        assert "Дані пошкоджено" not in texts and dialog.windowTitle() != "Дані пошкоджено"
+    assert dialog.close_button.text() == "Закрити застосунок"
+    assert dialog.restore_button.text() == "Відновити з вибраної копії"
+    assert (dialog.start_empty_button is not None) == (mode == "missing")
 
 
 # T14. Невдале відкладення залишків ------------------------------------------------------------
