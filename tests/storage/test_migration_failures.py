@@ -10,7 +10,8 @@
 * ін'єкція (підклас ``sqlite3.Connection`` через ``factory=``): первинна помилка після
   ``BEGIN`` і/або невдалий ``ROLLBACK`` — детерміновано не відтворюється справжнім SQLite;
 * межа запуску: ``prepare_database`` (закриття без checkpoint лише для пошкодження) і
-  ``start_session`` (звичайна помилка — повідомлення й код 2, пошкодження — карантин і діалог).
+  ``start_session`` для звичайної помилки (повідомлення й код 2). Пошкодження на запуску
+  (карантин і діалог) потребує Qt — ``tests/ui/test_migration_corruption_startup.py``.
 
 Справжня помилка диска (SQLite відкочує транзакцію сама) тут не дублюється: її покриває
 ``tests/storage/test_transaction.py``, а ``migrate`` у цьому разі йде тією самою гілкою
@@ -36,7 +37,6 @@ from budget.storage.database import close_without_checkpoint, open_database
 from budget.storage.integrity import corruption_code, integrity_check
 from budget.storage.migrations import migrate
 from budget.storage.recovery import database_files
-from budget.ui.dialogs.recovery_dialog import RecoveryDialog
 
 # Справжнє SQLITE_CORRUPT усередині міграції: таблиця вказує на сторінку за межами файлу.
 CORRUPTING_SQL = """
@@ -400,16 +400,3 @@ def test_start_session_reports_an_ordinary_migration_failure(startup, monkeypatc
     assert result == (app_module.EXIT_STARTUP_FAILED, False)
     assert messages == [StorageError.default_message] and not session.is_open
     assert paths.database.exists() and committed(paths.database) == (1, 0)
-
-
-def test_start_session_sends_migration_corruption_to_recovery(qtbot, startup, monkeypatch):
-    paths, clock, messages = startup
-    pending(monkeypatch, CORRUPTING_SQL)
-    shown = []
-    monkeypatch.setattr(RecoveryDialog, "exec", lambda self: shown.append(self) or 0)
-    session = ApplicationSession(paths, clock)
-    result = start_session(load_product_identity(), session, paths, clock)
-    assert result == (app_module.EXIT_DATA_CORRUPTED, False)
-    assert len(shown) == 1 and messages == [] and not session.is_open
-    assert not paths.database.exists()  # наявний шлях DS-6: карантин і діалог відновлення
-    assert [p for p in paths.root.iterdir() if p.name.startswith("budget.db.corrupted-")]
