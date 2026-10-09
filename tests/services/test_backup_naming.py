@@ -1,13 +1,16 @@
 """Види й назви резервних копій: форматування, розбір, порядок, нерозпізнані файли."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from budget.domain.calendar import FixedClock
 from budget.services.backup import (
     BackupKind,
+    RecoveryService,
     backup_file_name,
+    file_timestamp,
     newest_first,
     parse_backup_name,
 )
@@ -79,3 +82,27 @@ def test_newest_first_with_equal_timestamps_is_stable():
         "budget-20261006-120005-daily.db",
         "budget-20261005-090000-daily.db",
     ]
+
+
+@pytest.mark.parametrize(
+    ("moment", "stamp"),
+    [
+        pytest.param(datetime(2026, 10, 6, 9, 0, tzinfo=UTC), "20261006-120000", id="EEST"),
+        pytest.param(datetime(2026, 1, 15, 9, 0, tzinfo=UTC), "20260115-110000", id="EET"),
+    ],
+)
+def test_file_timestamp_is_kyiv_local_time_in_backup_name_format(moment, stamp):
+    """Мітка для назв відкладених файлів: локальний час Europe/Kyiv (літній і зимовий),
+    той самий формат, що й у назвах копій."""
+    clock = FixedClock(moment)
+    assert file_timestamp(clock) == stamp
+    assert backup_file_name(BackupKind.DAILY, clock.now()) == f"budget-{stamp}-daily.db"
+
+
+def test_quarantined_database_name_uses_the_file_timestamp(tmp_path):
+    database = tmp_path / "budget.db"
+    database.write_bytes(b"corrupted" * 100)
+    clock = FixedClock(datetime(2026, 10, 6, 9, 0, tzinfo=UTC))
+    quarantined = RecoveryService(database, tmp_path / "backups", clock).quarantine_corrupted()
+    assert quarantined == tmp_path / "budget.db.corrupted-20261006-120000"
+    assert quarantined.read_bytes() == b"corrupted" * 100 and not database.exists()

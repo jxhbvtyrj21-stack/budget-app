@@ -10,7 +10,7 @@ from pathlib import Path
 
 from budget.domain.calendar import Clock
 from budget.errors import DatabaseCorruptedError, StorageError
-from budget.services.backup import BackupKind, BackupService, _timestamp, find_backups
+from budget.services.backup import BackupKind, BackupService, file_timestamp, find_backups
 from budget.storage.database import close_without_checkpoint, open_database
 from budget.storage.integrity import quick_check
 from budget.storage.migrations import migrate, schema_version
@@ -68,7 +68,7 @@ def set_aside_orphaned_files(database: Path, clock: Clock) -> Path | None:
             return None
         if not any(p.exists() for p in database_files(database)[1:]):
             return None
-        return set_aside_database(database, f"orphaned-{_timestamp(clock)}")
+        return set_aside_database(database, f"orphaned-{file_timestamp(clock)}")
     except StorageError as exc:
         raise StorageError(ORPHANS_NOT_SET_ASIDE_MESSAGE, detail=exc.detail) from exc
     except OSError as exc:

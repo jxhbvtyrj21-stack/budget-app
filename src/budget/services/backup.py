@@ -218,7 +218,9 @@ class BackupService:
                 log.warning("Не вдалося видалити застарілу копію %s", stale.path, exc_info=True)
 
 
-def _timestamp(clock: Clock) -> str:
+def file_timestamp(clock: Clock) -> str:
+    """Мітка часу для назв файлів, що відкладаються вбік (``corrupted-``, ``replaced-``,
+    ``orphaned-``): локальний час годинника в тому самому форматі, що й у назвах копій."""
     return clock.now().strftime(_TIMESTAMP_FORMAT)
 
 
@@ -264,7 +266,7 @@ class RecoveryService:
 
     def quarantine_corrupted(self) -> Path:
         """Зберігає пошкоджену базу під новою назвою, нічого в неї не записуючи."""
-        return quarantine_database(self._database_path, _timestamp(self._clock))
+        return quarantine_database(self._database_path, file_timestamp(self._clock))
 
     def candidates(self) -> list[RestoreCandidate]:
         return restore_candidates(self._backups_dir)
@@ -284,7 +286,7 @@ class RecoveryService:
                 "Вибрана копія пошкоджена або не підходить для відновлення. Оберіть іншу копію.",
                 detail=f"Копія не пройшла перевірку: {backup_path}",
             )
-        stamp = _timestamp(self._clock)
+        stamp = file_timestamp(self._clock)
         before_restore, corrupted = None, False
         if self._database_path.exists():
             try:
