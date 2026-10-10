@@ -22,9 +22,21 @@ def open_database(path: Path) -> sqlite3.Connection:
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA foreign_keys=ON")
     except sqlite3.DatabaseError as exc:
-        connection.close()
+        close_without_checkpoint(connection)
         raise DatabaseCorruptedError(detail=f"{path}: {exc}") from exc
     if str(mode).lower() != "wal":
         connection.close()
         raise StorageError(detail=f"Не вдалося ввімкнути WAL для {path}: {mode}")
     return connection
+
+
+def close_without_checkpoint(connection: sqlite3.Connection) -> None:
+    """Закриває з'єднання з пошкодженою базою, нічого не записуючи в її основний файл.
+
+    Звичайне закриття останнього з'єднання переносить кадри WAL в основний файл
+    (checkpoint) і прибирає ``-wal``/``-shm``. Для пошкодженої бази це запис у
+    пошкоджені дані, тож checkpoint під час закриття вимикається: ``.db``, ``-wal`` і
+    ``-shm`` лишаються такими, якими були в момент виявлення, і переносяться разом.
+    """
+    connection.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+    connection.close()

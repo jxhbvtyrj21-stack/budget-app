@@ -26,8 +26,11 @@ def amount_label(amount: Money, role: str = "amount") -> QLabel:
     return label
 
 
+BUTTON_VARIANTS = ("primary", "secondary", "text", "danger-text")
+
+
 def button(text: str, variant: str = "secondary") -> QPushButton:
-    if variant not in ("primary", "secondary"):
+    if variant not in BUTTON_VARIANTS:
         raise ValueError(variant)
     widget = QPushButton(text)
     widget.setProperty("variant", variant)

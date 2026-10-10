@@ -10,6 +10,7 @@ from budget.domain.money import Money
 from budget.platform.identity import load_product_identity
 from budget.platform.paths import DataPaths
 from budget.platform.resources import assets_dir
+from budget.services.facade import AppServices
 from budget.storage.transaction import transaction
 from budget.ui.formatting import format_money
 from budget.ui.main_window import FOOTER_ROUTES, MAIN_ROUTES, MainWindow
@@ -27,10 +28,11 @@ def connection(tmp_path):
 
 
 def test_clean_database_starts_in_setup_mode(qtbot, connection):
-    window = build_main_window(load_product_identity(), connection)
+    window = build_main_window(load_product_identity(), connection, CLOCK)
     qtbot.addWidget(window)
     assert window.sidebar is None
     assert window.routes() == ["setup"]
+    assert window.wizard is not None
     assert window.windowTitle() == load_product_identity().name
 
 
@@ -39,7 +41,7 @@ def test_completed_setup_shows_all_routes(qtbot, connection):
         connection.execute(
             "UPDATE setup_state SET status = 'completed', completed_month = '2026-10' WHERE id = 1"
         )
-    window = build_main_window(load_product_identity(), connection)
+    window = build_main_window(load_product_identity(), connection, CLOCK)
     qtbot.addWidget(window)
     expected = [route for route, _ in MAIN_ROUTES + FOOTER_ROUTES]
     assert window.routes() == expected
@@ -50,15 +52,19 @@ def test_completed_setup_shows_all_routes(qtbot, connection):
         assert window.sidebar.active_route() == route
 
 
-def test_sidebar_click_navigates(qtbot):
-    window = MainWindow("Test", setup_completed=True)
+def test_sidebar_click_navigates(qtbot, connection):
+    with transaction(connection):
+        connection.execute(
+            "UPDATE setup_state SET status = 'completed', completed_month = '2026-10' WHERE id = 1"
+        )
+    window = MainWindow("Test", AppServices.create(connection, CLOCK))
     qtbot.addWidget(window)
     window.sidebar._buttons["debts"].click()
     assert window.current_route() == "debts"
 
 
 def test_stylesheet_applies(qtbot, connection):
-    build_main_window(load_product_identity(), connection)
+    build_main_window(load_product_identity(), connection, CLOCK)
     sheet = QApplication.instance().styleSheet()
     assert ROLES["bg"] in sheet and ROLES["primary"] in sheet
 
@@ -88,7 +94,7 @@ def test_rendered_colors_match_tokens(qtbot, connection):
         connection.execute(
             "UPDATE setup_state SET status = 'completed', completed_month = '2026-10' WHERE id = 1"
         )
-    window = build_main_window(load_product_identity(), connection)
+    window = build_main_window(load_product_identity(), connection, CLOCK)
     qtbot.addWidget(window)
     window.resize(1280, 800)
     window.show()
