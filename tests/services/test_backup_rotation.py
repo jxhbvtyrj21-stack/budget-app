@@ -1,6 +1,9 @@
 """Ротація копій: окремі пули 7/4/12, захищені види й невідомі файли не видаляються (DS-5)."""
 
 import logging
+import subprocess
+import sys
+import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -15,6 +18,8 @@ from budget.services.backup import (
     parse_backup_name,
 )
 from budget.services.startup import prepare_database
+from budget.storage.backup import PARTIAL_SUFFIX
+from budget.storage.recovery import verify_backup
 
 START = datetime(2026, 10, 6, 9, 0, tzinfo=UTC)  # 12:00 за Києвом
 
@@ -200,3 +205,67 @@ def test_failed_deletion_is_logged_and_rotation_continues(setup, monkeypatch, ca
     assert locked.name in daily and pool[1] not in daily and pool[2] not in daily
     assert len(daily) == 8  # зайнятий файл лишився до наступної ротації
     assert "Не вдалося видалити" in caplog.text
+
+
+# Аварія під час автоматичної копії (B1) ----------------------------------------------------
+
+CRASH_DURING_AUTOMATIC = textwrap.dedent(
+    """
+    import os, sys
+    from datetime import datetime
+    from pathlib import Path
+    import budget.storage.backup as backup
+    from budget.domain.calendar import FixedClock
+    from budget.services.backup import BackupService
+    from budget.storage.database import open_database
+
+    database, backups_dir, moment = sys.argv[1:4]
+    calls = []
+    original = backup.integrity_check
+
+    def check(connection):  # аварія під час перевірки вже записаної щоденної копії
+        calls.append(connection)
+        if len(calls) == 2:
+            os._exit(9)
+        return original(connection)
+
+    backup.integrity_check = check
+    connection = open_database(Path(database))
+    clock = FixedClock(datetime.fromisoformat(moment))
+    BackupService(connection, Path(backups_dir), clock).run_automatic()
+    """
+)
+
+
+def test_crashed_automatic_copy_neither_blocks_the_period_nor_takes_a_rotation_slot(
+    setup, clock, tmp_path
+):
+    service, backups_dir = setup
+    run_days(service, clock, 7)  # 7 справних щоденних копій
+    day8 = START + timedelta(days=7)
+    crashed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            CRASH_DURING_AUTOMATIC,
+            str(tmp_path / "data" / "budget.db"),
+            str(backups_dir),
+            day8.isoformat(),
+        ]
+    )
+    assert crashed.returncode == 9
+    partials = [name for name in names(backups_dir) if PARTIAL_SUFFIX in name]
+    assert partials  # аварія лишила лише тимчасовий файл
+    assert not [n for n in names(backups_dir, BackupKind.DAILY) if n.startswith("budget-20261013")]
+
+    clock.set(day8)
+    created = [path.name for path in service.run_automatic()]
+    assert backup_file_name(BackupKind.DAILY, clock.now().replace(tzinfo=None)) in created
+    for day in (8, 9):
+        clock.set(START + timedelta(days=day))
+        service.run_automatic()
+
+    daily = names(backups_dir, BackupKind.DAILY)
+    assert len(daily) == 7  # правило ротації 7, і всі місця — справні копії
+    assert all(verify_backup(backups_dir / name) for name in daily)
+    assert daily[-1].startswith("budget-20261015")
