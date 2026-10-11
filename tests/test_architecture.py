@@ -1,6 +1,7 @@
 """Архітектурні обмеження (розділ 5.2, ADR 0008, ADR 0009, ADR 0015)."""
 
 import ast
+import re
 import tomllib
 from pathlib import Path
 
@@ -128,3 +129,96 @@ def test_colors_only_in_theme():
         if pattern.search(p.read_text(encoding="utf-8")) and "ui/theme" not in p.as_posix()
     ]
     assert not offenders, offenders
+
+
+# Межа читання (IA 12, E2) ---------------------------------------------------------------------
+
+READ_BOUNDARY = SRC / "ui" / "components" / "read_error.py"
+READ_FAILURE = SRC / "services" / "read_errors.py"
+BROAD = {"Exception", "BaseException"}
+
+
+def broad_handlers(path: Path) -> list[ast.ExceptHandler]:
+    """``except:``, ``except Exception`` чи ``except BaseException`` (також у кортежі)."""
+    found = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        types = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
+        names = {getattr(t, "id", getattr(t, "attr", None)) for t in types if t is not None}
+        if node.type is None or names & BROAD:
+            found.append(node)
+    return found
+
+
+def test_broad_except_in_ui_only_in_the_read_boundary():
+    found = {
+        p.relative_to(SRC).as_posix(): len(broad_handlers(p))
+        for p in modules("ui")
+        if broad_handlers(p)
+    }
+    assert found == {"ui/components/read_error.py": 1}
+
+
+def test_read_boundary_reraises_unchanged_and_keeps_no_exception():
+    """Класифікація лише через ``read_failure``; усе інше — bare ``raise`` (той самий
+    об'єкт), без ``raise X from``; виняток не записується в атрибути."""
+    (handler,) = broad_handlers(READ_BOUNDARY)
+    calls = {
+        node.func.id
+        for node in ast.walk(handler)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "read_failure" in calls
+    raises = [node for node in ast.walk(handler) if isinstance(node, ast.Raise)]
+    assert raises and all(node.exc is None and node.cause is None for node in raises)
+    stores = [
+        node
+        for node in ast.walk(handler)
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
+    ]
+    assert stores == []
+
+
+def test_read_failure_uses_the_guard_classification_and_operational_error_only():
+    source = READ_FAILURE.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imports = {
+        (node.module, alias.name)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert ("budget.storage.integrity", "corruption_code") in imports  # та сама, що в guard
+    # Надто широкий критерій (DatabaseError і його підкласи) заборонений.
+    assert "DatabaseError" not in source
+    checked = [
+        ast.unparse(node.args[1])
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "isinstance"
+    ]
+    assert checked == ["sqlite3.OperationalError"]
+
+
+def test_ui_does_not_classify_sqlite_errors_itself():
+    for path in modules("ui"):
+        text = path.read_text(encoding="utf-8")
+        assert "corruption_code" not in text and "sqlite_errorcode" not in text, path
+
+
+def test_read_error_path_is_not_used_by_storage_recovery_or_app():
+    pattern = re.compile(r"\b(read_failure|DataReadError|ReadBoundary|ReadErrorState)\b")
+    users = {
+        p.relative_to(SRC).as_posix()
+        for p in modules()
+        if pattern.search(p.read_text(encoding="utf-8"))
+    }
+    assert users == {
+        "errors.py",
+        "services/read_errors.py",
+        "ui/components/read_error.py",
+        "ui/screens/overview.py",
+        "ui/screens/month.py",
+        "ui/screens/accumulations.py",
+        "ui/screens/debts.py",
+    }

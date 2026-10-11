@@ -106,6 +106,41 @@ class AccumulationStatus(StrEnum):
     CLOSED = "closed"
 
 
+# Ручні переходи статусів (ADR 0007, п. 14). «Закрите» ще потребує нульового залишку,
+# а архівоване накопичення статусу не змінює (Q188) — це перевіряє сервіс.
+ACCUMULATION_TRANSITIONS: dict[AccumulationStatus, tuple[AccumulationStatus, ...]] = {
+    AccumulationStatus.ACTIVE: (AccumulationStatus.REACHED, AccumulationStatus.CLOSED),
+    AccumulationStatus.REACHED: (AccumulationStatus.ACTIVE, AccumulationStatus.CLOSED),
+    AccumulationStatus.CLOSED: (AccumulationStatus.ACTIVE,),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class TargetProgress:
+    """Прогрес до цільової суми — похідний показник, не бізнес-значення (ADR 0007, п. 15)."""
+
+    balance: Money
+    target: Money
+
+    @property
+    def percent(self) -> int:
+        """Ціла частина відсотка; понад ціль може перевищувати 100."""
+        return self.balance.kopiyky * 100 // self.target.kopiyky
+
+    @property
+    def excess(self) -> Money:
+        """На скільки залишок перевищує ціль (0, якщо не перевищує)."""
+        difference = self.balance - self.target
+        return difference if difference.is_positive else Money.zero()
+
+
+def target_progress(balance: Money, target: Money | None) -> TargetProgress | None:
+    """Прогрес лише для додатної цільової суми: без цілі чи з нульовою — ділення немає."""
+    if target is None or not target.is_positive:
+        return None
+    return TargetProgress(balance, target)
+
+
 @dataclass(frozen=True, slots=True)
 class Accumulation:
     """Накопичення: залишок похідний (початковий баланс + поповнення − витрати − погашення).
@@ -168,6 +203,17 @@ class Replenishment:
         for part in self.parts:
             total = total + part.amount
         return total
+
+    def totals_by_source(self) -> dict[SourceRef, Money]:
+        """Сума частин за кожним джерелом у порядку першої появи.
+
+        Достатність коштів перевіряється для джерела загалом (ADR 0007, п. 5), тож
+        дві частини з одного джерела не дають обійти його залишок.
+        """
+        totals: dict[SourceRef, Money] = {}
+        for part in self.parts:
+            totals[part.source] = totals.get(part.source, Money.zero()) + part.amount
+        return totals
 
 
 class DebtOrigin(StrEnum):
@@ -232,6 +278,32 @@ class BaseMinimum:
 
     def __post_init__(self) -> None:
         require_non_negative(self.amount)
+
+
+class MinimumComparison(StrEnum):
+    """Фактичні витрати проти базового мінімуму — лише інформаційно (ADR 0020)."""
+
+    GREATER = "greater"
+    LESS = "less"
+    EQUAL = "equal"
+
+
+@dataclass(frozen=True, slots=True)
+class BaseMinimumComparison:
+    outcome: MinimumComparison
+    difference: Money  # завжди невід'ємна; для EQUAL — 0
+
+
+def compare_with_base_minimum(actual: Money, base_minimum: Money) -> BaseMinimumComparison:
+    """Порівнює фактичні витрати з базовим мінімумом у копійках, без ``float``.
+
+    Перевищення не є боргом і нічого не блокує (ADR 0002, п. 4).
+    """
+    if actual > base_minimum:
+        return BaseMinimumComparison(MinimumComparison.GREATER, actual - base_minimum)
+    if actual < base_minimum:
+        return BaseMinimumComparison(MinimumComparison.LESS, base_minimum - actual)
+    return BaseMinimumComparison(MinimumComparison.EQUAL, Money.zero())
 
 
 class SetupStatus(StrEnum):

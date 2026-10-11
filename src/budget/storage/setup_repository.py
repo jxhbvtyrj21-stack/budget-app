@@ -43,3 +43,10 @@ class SetupStateRepository:
         self._connection.execute(
             "UPDATE setup_state SET status = 'not_started', draft_json = NULL WHERE id = 1"
         )
+
+    def mark_completed(self, month: CalendarMonth) -> None:
+        self._connection.execute(
+            "UPDATE setup_state SET status = 'completed', draft_json = NULL, completed_month = ?"
+            " WHERE id = 1",
+            (str(month),),
+        )
