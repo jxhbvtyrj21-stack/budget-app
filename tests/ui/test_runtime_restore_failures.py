@@ -18,6 +18,7 @@ import pytest
 import test_runtime_restore as c52
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
+from tests.sqlite_targets import connect_target
 
 import budget.app as app_module
 from budget.app import (
@@ -100,7 +101,7 @@ def connections(monkeypatch):
 
     def connect(target, *args, **kwargs):
         connection = original(target, *args, **kwargs)
-        opened.append((str(target), connection))
+        opened.append((connect_target(target, kwargs.get("uri", False)), connection))
         return connection
 
     monkeypatch.setattr(sqlite3, "connect", connect)

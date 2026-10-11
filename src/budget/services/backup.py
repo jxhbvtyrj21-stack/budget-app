@@ -379,7 +379,7 @@ class RecoveryService:
             raise RestoreError(ROLLBACK_FAILED_MESSAGE, detail=exc.detail) from exc
 
     def _backup_current(self) -> Path:
-        connection = open_database(self._database_path)
+        connection = open_database(self._database_path, create=False)
         try:
             return BackupService(connection, self._backups_dir, self._clock).create_backup(
                 BackupKind.BEFORE_RESTORE

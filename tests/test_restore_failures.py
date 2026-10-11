@@ -216,12 +216,15 @@ def test_wal_file_that_cannot_move_keeps_database_files_together(paths, clock, b
 
 def test_restored_database_failing_startup_check_is_rolled_back(paths, clock, backup, monkeypatch):
     quarantined(paths, clock)
+    creates = []
 
-    def corrupted(*args):
+    def corrupted(*args, create):
+        creates.append(create)
         raise DatabaseCorruptedError(detail="quick_check не пройдено")
 
     monkeypatch.setattr(app_module, "prepare_database", corrupted)
     restore_fails(paths, clock, backup)  # не DatabaseCorruptedError: це невдале відновлення
+    assert creates == [False]  # відновлену базу відкривають без права створення
     assert not any(p.exists() for p in database_files(paths.database))
     assert backup.exists()
 
@@ -297,7 +300,8 @@ def test_repeated_recovery(paths, clock, backup, monkeypatch):
 def test_double_failure_after_reopen_reports_both_errors(paths, clock, backup, monkeypatch, caplog):
     quarantined(paths, clock)
 
-    def corrupted(*args):
+    def corrupted(*args, create):
+        assert create is False  # відновлену базу відкривають без права створення
         raise DatabaseCorruptedError(detail="quick_check не пройдено")
 
     def locked(database_path):

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
+from tests.sqlite_targets import connect_target
 
 import budget.app as app_module
 from budget.app import (
@@ -70,10 +71,10 @@ def running(tmp_path, qtbot, monkeypatch):
     window.show()
     # Відновлення, заміна сервісів чи нове з'єднання — не для скасування й невдалого карантину.
     forbidden = []
-    monkeypatch.setattr(app_module, "restore_and_open", lambda *a: forbidden.append("restore"))
-    monkeypatch.setattr(MainWindow, "replace_services", lambda *a: forbidden.append("replace"))
-    monkeypatch.setattr(ApplicationSession, "open", lambda *a: forbidden.append("open"))
-    monkeypatch.setattr(ApplicationSession, "adopt", lambda *a: forbidden.append("adopt"))
+    monkeypatch.setattr(app_module, "restore_and_open", lambda *a, **k: forbidden.append("restore"))
+    monkeypatch.setattr(MainWindow, "replace_services", lambda *a, **k: forbidden.append("replace"))
+    monkeypatch.setattr(ApplicationSession, "open", lambda *a, **k: forbidden.append("open"))
+    monkeypatch.setattr(ApplicationSession, "adopt", lambda *a, **k: forbidden.append("adopt"))
     yield paths, session, connection, window, forbidden, services
     window.close()
     session.close()
@@ -343,17 +344,19 @@ def test_no_new_connection_to_the_database_before_quarantine(
     original_connect = sqlite3.connect
 
     def connect(target, *args, **kwargs):
-        opened.append(str(target))
+        opened.append((str(target), connect_target(target, kwargs.get("uri", False))))
         return original_connect(target, *args, **kwargs)
 
     monkeypatch.setattr(sqlite3, "connect", connect)
-    monkeypatch.setattr(backup_service_module, "open_database", lambda *a: reopened.append(a))
+    monkeypatch.setattr(
+        backup_service_module, "open_database", lambda *a, **k: reopened.append((a, k))
+    )
     recorder = Recorder()
     run_runtime_recovery(qtbot, make_flow(session, paths, recorder), window, recorder, cancel)
-    assert [target for target in opened if target == str(paths.database)] == []
+    assert [path for _, path in opened if path == str(paths.database)] == []
     assert reopened == [] and forbidden == []
     # Інші відкриття — лише перевірка копій у теці backups (immutable, лише читання).
-    assert all("backups" in target and "immutable=1" in target for target in opened)
+    assert all("backups" in raw and "immutable=1" in raw for raw, _ in opened)
 
 
 # Повторні й звичайні помилки ----------------------------------------------------------------

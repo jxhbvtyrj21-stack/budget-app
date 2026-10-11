@@ -75,13 +75,16 @@ def set_aside_orphaned_files(database: Path, clock: Clock) -> Path | None:
         raise StorageError(ORPHANS_NOT_SET_ASIDE_MESSAGE, detail=str(exc)) from exc
 
 
-def prepare_database(database_path: Path, backups_dir: Path, clock: Clock) -> sqlite3.Connection:
+def prepare_database(
+    database_path: Path, backups_dir: Path, clock: Clock, *, create: bool = True
+) -> sqlite3.Connection:
     """Відкриває базу, виконує ``quick_check`` і міграції.
 
     Пошкоджена база — ``DatabaseCorruptedError``; у такому разі нічого не записується.
-    Перед міграцією наявної бази робиться резервна копія (DS-5).
+    Перед міграцією наявної бази робиться резервна копія (DS-5). ``create=False`` — база
+    вже має існувати (``open_database``): зниклий файл — ``StorageError``, нової бази немає.
     """
-    connection = open_database(database_path)
+    connection = open_database(database_path, create=create)
     try:
         if not quick_check(connection):
             raise DatabaseCorruptedError(detail=f"quick_check не пройдено: {database_path}")

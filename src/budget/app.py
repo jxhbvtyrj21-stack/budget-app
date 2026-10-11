@@ -69,13 +69,16 @@ def self_check() -> int:
     return EXIT_OK if healthy else EXIT_STARTUP_FAILED
 
 
-def open_application_database(paths: DataPaths, clock: Clock) -> sqlite3.Connection:
+def open_application_database(
+    paths: DataPaths, clock: Clock, *, create: bool = True
+) -> sqlite3.Connection:
     """Відкриває й готує базу, потім створює автоматичні копії поточного періоду (DS-5).
 
     Пошкодження, виявлене повним ``integrity_check`` перед копією, — ``DatabaseCorruptedError``:
     з'єднання закривається без жодного запису, далі — наявний карантин (DS-6).
+    ``create=False`` — база вже має існувати (``open_database``).
     """
-    connection = prepare_database(paths.database, paths.backups, clock)
+    connection = prepare_database(paths.database, paths.backups, clock, create=create)
     try:
         BackupService(connection, paths.backups, clock).run_automatic()
     except DatabaseCorruptedError:
@@ -110,10 +113,11 @@ class ApplicationSession:
             raise RuntimeError("Немає відкритої бази в сесії")
         return self._connection
 
-    def open(self) -> sqlite3.Connection:
-        """Відкриває базу звичайним шляхом запуску (``open_application_database``)."""
+    def open(self, *, create: bool = True) -> sqlite3.Connection:
+        """Відкриває базу звичайним шляхом запуску (``open_application_database``).
+        ``create=False`` — база вже має існувати; зниклий файл — ``StorageError``."""
         self._require_closed()
-        self._connection = open_application_database(self._paths, self._clock)
+        self._connection = open_application_database(self._paths, self._clock, create=create)
         return self._connection
 
     def adopt(self, connection: sqlite3.Connection) -> None:
@@ -368,7 +372,7 @@ def restore_and_open(paths: DataPaths, clock: Clock, backup_path: Path) -> sqlit
     recovery = RecoveryService(paths.database, paths.backups, clock)
     outcome = recovery.restore(backup_path)
     try:
-        connection = open_application_database(paths, clock)
+        connection = open_application_database(paths, clock, create=False)
     except BudgetError as exc:
         log.exception("Restored database failed to open")
         _roll_back(recovery, outcome, exc)
@@ -550,7 +554,7 @@ class ManualRestore:
         """Попередня база на місці: звичайне відкриття сесії й новий граф. Невдача —
         вихід; ``RestoreError`` лишається в ``__context__`` нової помилки."""
         try:
-            self._session.open()
+            self._session.open(create=False)  # попередня база має бути на місці
             self._resume(self._session.connection)
         except Exception as failure:
             log.exception("Reopening the current data after a failed manual restore failed")
@@ -772,8 +776,13 @@ def start_session(
     нова база не створюється: діалог відновлення без карантину (бази немає). Нова
     порожня база — лише після явного «Почати з порожніми даними». Невідомий стан теки
     даних (``OSError`` під час перевірки) — контрольований вихід без бази.
+
+    База була на місці до пошуку ознак — відкриття без права створення (F8, S1): якщо
+    файл зник до відкриття, це ``StorageError``, а не нова порожня база. Створення нової
+    бази — лише перший запуск (бази й ознак немає) і явне «Почати з порожніми даними».
     """
     try:
+        database_existed = paths.database.exists()
         indicators = startup_recovery_indicators(paths.root, paths.database, paths.backups)
     except OSError:
         log.exception("Startup data directory inspection failed")
@@ -790,8 +799,9 @@ def start_session(
             session.adopt(recovered.restored)
             return None, True
         log.info("Starting with empty data by explicit choice; previous files are kept")
+        database_existed = False  # нову базу створює саме явний вибір
     try:
-        session.open()
+        session.open(create=not database_existed)
     except DatabaseCorruptedError as exc:
         log.exception("Database corrupted")
         connection = _recover_corrupted_database(identity, paths, clock, exc)

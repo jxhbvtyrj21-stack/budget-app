@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
+from tests.sqlite_targets import connect_target
 
 import budget.app as app_module
 import budget.services.startup as startup_module
@@ -111,7 +112,7 @@ def watch(monkeypatch, paths):
     original_connect = sqlite3.connect
 
     def connect(target, *args, **kwargs):
-        seen["connect"].append(str(target))
+        seen["connect"].append(connect_target(target, kwargs.get("uri", False)))
         return original_connect(target, *args, **kwargs)
 
     def spy(key, owner, name):

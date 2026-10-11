@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QObject
 from PySide6.QtWidgets import QApplication, QMessageBox
+from tests.sqlite_targets import connect_target
 
 import budget.app as app_module
 import budget.ui.screens.service as service_module
@@ -189,6 +190,7 @@ def spies(monkeypatch):
         "returned": [],
         "raised": [],
         "open": 0,
+        "open_create": [],
         "adopt": [],
         "create": [],
         "replace": [],
@@ -219,9 +221,10 @@ def spies(monkeypatch):
     monkeypatch.setattr(app_module, "restore_and_open", restore_and_open)
     original_open = ApplicationSession.open
 
-    def session_open(session):
+    def session_open(session, **kwargs):
         seen["open"] += 1
-        return original_open(session)
+        seen["open_create"].append(kwargs.get("create", True))
+        return original_open(session, **kwargs)
 
     monkeypatch.setattr(ApplicationSession, "open", session_open)
     original_adopt = ApplicationSession.adopt
@@ -258,7 +261,7 @@ def spies(monkeypatch):
 
     def connect(target, *args, **kwargs):
         connection = original_connect(target, *args, **kwargs)
-        seen["connect"].append((str(target), connection))
+        seen["connect"].append((connect_target(target, kwargs.get("uri", False)), connection))
         return connection
 
     monkeypatch.setattr(sqlite3, "connect", connect)
@@ -393,8 +396,9 @@ def test_failed_restore_reopens_current_data_and_keeps_working(
         page.restore_button.click()
     (error,) = spies["raised"]
     assert isinstance(error, RestoreError) and error.user_message != ROLLBACK_FAILED_MESSAGE
-    # Повторне відкриття через сесію — рівно один раз; новий граф на новому з'єднанні.
+    # Повторне відкриття через сесію — рівно один раз і без права створити нову базу.
     assert spies["open"] == 1 and spies["adopt"] == []
+    assert spies["open_create"] == [False]
     reopened = app.session.connection
     assert reopened is not app.old_connection and is_closed(app.old_connection)
     assert spies["corruption_close"] == 0
@@ -464,11 +468,11 @@ def test_reopen_failure_is_terminal_and_keeps_both_errors(
     original_open = app_module.open_application_database
     calls = []
 
-    def open_application_database(paths, clock):
-        calls.append(True)
+    def open_application_database(paths, clock, *, create):
+        calls.append(create)
         if len(calls) == 2:  # перше — у restore_and_open, друге — повторне відкриття сесії
             raise StorageError(detail="повторне відкриття не вдалося (введено тестом)")
-        return original_open(paths, clock)
+        return original_open(paths, clock, create=create)
 
     monkeypatch.setattr(app_module, "open_application_database", open_application_database)
     app.restore()
@@ -477,6 +481,7 @@ def test_reopen_failure_is_terminal_and_keeps_both_errors(
     assert isinstance(failure, StorageError) and "повторне відкриття" in failure.detail
     assert failure.__context__ is primary  # первинна RestoreError збережена
     assert spies["open"] == 1 and spies["replace"] == []
+    assert calls == [False, False]  # ні відновлена, ні попередня база не створюються заново
     assert app.exits == [EXIT_DATA_CORRUPTED]
     assert app.errors == [MANUAL_RESTORE_REOPEN_FAILED_MESSAGE]
     assert not app.window.isEnabled() and not app.session.is_open

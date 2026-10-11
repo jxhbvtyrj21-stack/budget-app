@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
+from tests.sqlite_targets import connect_target
 
 import budget.app as app_module
 from budget.app import EXIT_DATA_CORRUPTED, ApplicationSession, runtime_recovery_guard
@@ -343,7 +344,8 @@ def test_no_second_connection_after_restore_and_open(
 
     def connect(target, *args, **kwargs):
         connection = original_connect(target, *args, **kwargs)
-        events.append(("connect", str(target), connection))
+        raw, path = str(target), connect_target(target, kwargs.get("uri", False))
+        events.append(("connect", (raw, path), connection))
         return connection
 
     monkeypatch.setattr(sqlite3, "connect", connect)
@@ -361,9 +363,9 @@ def test_no_second_connection_after_restore_and_open(
     after = [(target, c) for kind, target, c in events[boundary + 1 :] if kind == "connect"]
     # Після відновлення — жодного з'єднання з робочою базою; лише короткі перевірки копій
     # (лише читання, immutable), уже закриті.
-    assert all("backups" in t and "immutable=1" in t and is_closed(c) for t, c in after)
+    assert all("backups" in raw and "immutable=1" in raw and is_closed(c) for (raw, _), c in after)
     to_database = [
-        c for kind, t, c in events if kind == "connect" and t == str(running.paths.database)
+        c for kind, t, c in events if kind == "connect" and t[1] == str(running.paths.database)
     ]
     still_open = [c for c in to_database if not is_closed(c)]
     assert still_open == [running.session.connection]  # одна постійна база — у сесії

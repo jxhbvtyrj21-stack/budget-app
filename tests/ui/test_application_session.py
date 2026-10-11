@@ -170,12 +170,16 @@ def test_startup_failure_leaves_no_open_connection(session, paths, clock, monkey
     messages = []
     monkeypatch.setattr(app_module, "_show_message", lambda title, text: messages.append(text))
 
-    def failing(paths, clock):
+    creates = []
+
+    def failing(paths, clock, *, create):
+        creates.append(create)
         raise StorageError("Не вдалося відкрити базу.")
 
     monkeypatch.setattr(app_module, "open_application_database", failing)
     result = start_session(load_product_identity(), session, paths, clock)
     assert result == (EXIT_STARTUP_FAILED, False)
+    assert creates == [True]  # перший запуск: бази ще немає, створення дозволене
     assert not session.is_open and messages == ["Не вдалося відкрити базу."]
 
 
