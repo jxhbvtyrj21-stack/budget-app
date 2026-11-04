@@ -59,6 +59,43 @@ QLineEdit {{
 QLineEdit:focus {{ border: 2px solid {r["focus-ring"]}; }}
 QLineEdit:disabled {{ background: {r["surface-sunken"]}; color: {r["text-disabled"]}; }}
 QLabel[tone="muted"] {{ color: {r["text-muted"]}; }}
+QLabel[tone="error"] {{ color: {r["danger-text"]}; font-size: 12px; }}
+QLabel[tone="primary"] {{ color: {r["primary"]}; }}
+QPushButton[variant="text"] {{
+    background: transparent; color: {r["primary"]}; border: none; padding: 0; font-weight: 600;
+}}
+QPushButton[variant="text"]::menu-indicator {{ image: none; width: 0; }}
+QPushButton[variant="danger-text"] {{
+    background: transparent; color: {r["danger-text"]}; border: none; padding: 0;
+}}
+#Notice {{
+    background: {r["notice-soft"]}; border-left: 3px solid {r["notice-border"]};
+    border-radius: {RADII["sm"]}px;
+}}
+#ErrorNotice {{
+    background: {r["danger-soft"]}; border-left: 3px solid {r["danger"]};
+    border-radius: {RADII["sm"]}px;
+}}
+#ListRow {{ border-bottom: 1px solid {r["divider"]}; }}
+#DividedSection {{ border-top: 1px solid {r["divider"]}; }}
+QPushButton[segment="true"]:checked {{
+    background: {r["primary-soft"]}; color: {r["primary"]}; border-color: {r["primary"]};
+}}
+#StatusBadge {{
+    border-radius: {RADII["sm"]}px; padding: 0 {SPACING[2]}px; font-weight: 600;
+}}
+#StatusBadge[badge="active"] {{ border: 1px solid {r["border-control"]}; color: {r["text"]}; }}
+#StatusBadge[badge="reached"] {{ background: {r["primary-soft"]}; color: {r["primary"]}; }}
+#StatusBadge[badge="closed"], #StatusBadge[badge="paid"] {{
+    background: {r["neutral-fill"]}; color: {r["on-neutral-fill"]};
+}}
+#ArchiveMarker {{ color: {r["text-muted"]}; font-weight: 600; }}
+#TargetProgress {{
+    background: {r["surface-sunken"]}; border: none; border-radius: {RADII["sm"]}px;
+}}
+#TargetProgress::chunk {{ background: {r["primary"]}; border-radius: {RADII["sm"]}px; }}
+#InfoBanner {{ background: {r["surface-sunken"]}; border-radius: {RADII["sm"]}px; }}
+QDialog {{ background: {r["surface"]}; }}
 """,
     ]
     for role in TYPE_SCALE:
