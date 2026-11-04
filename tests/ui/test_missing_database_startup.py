@@ -716,6 +716,7 @@ def test_failure_cause_respects_exception_chain_visibility():
 
     assert app_module._failure_cause(explicit) == "RuntimeError <- KeyError"
 
+
 class FailingStatAfterSetAside:
     """D1: ``Path.exists`` для вже відкладених файлів дає ``OSError`` (EIO) — лише у вікні
     між поверненням ``set_aside_database`` і наступним кроком основного потоку. Поза вікном
