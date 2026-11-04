@@ -146,8 +146,8 @@ class Startup:
 
         original_restore = app_module.restore_and_open
 
-        def restore_and_open(paths, clock, backup_path):
-            connection = original_restore(paths, clock, backup_path)
+        def restore_and_open(paths, clock, backup_path, **kwargs):
+            connection = original_restore(paths, clock, backup_path, **kwargs)
             self.returned.append(connection)
             return connection
 

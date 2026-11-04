@@ -228,7 +228,7 @@ def test_startup_restore_hands_the_restored_connection_to_the_session(
     monkeypatch.setattr(
         app_module,
         "restore_and_open",
-        lambda *args: returned.append(original(*args)) or returned[-1],
+        lambda *args, **kwargs: returned.append(original(*args, **kwargs)) or returned[-1],
     )
     transitions = []
     monkeypatch.setattr(

@@ -1,6 +1,7 @@
 """Складання застосунку: ідентичність, шляхи, база, тема, головне вікно."""
 
 import argparse
+import errno
 import logging
 import sqlite3
 import sys
@@ -361,16 +362,30 @@ class RuntimeRecoveryFlow:
         self._exit_application(EXIT_DATA_CORRUPTED)
 
 
-def restore_and_open(paths: DataPaths, clock: Clock, backup_path: Path) -> sqlite3.Connection:
+def restore_and_open(
+    paths: DataPaths, clock: Clock, backup_path: Path, *, log_not_performed: bool = False
+) -> sqlite3.Connection:
     """Відновлює базу з копії й відкриває її звичайним шляхом запуску (DS-6).
 
     Після заміни файлів база проходить ``quick_check``, обов'язкову копію перед
     міграцією й міграції, автоматичні копії та повну перевірку цілісності. Лише
     тоді з'єднання повертається застосунку. Будь-яка невдача — ``RestoreError``,
     а файли бази повертаються до стану перед спробою.
+
+    ``log_not_performed`` — записати в журнал збій до заміни бази (перевірка копії,
+    відкладення, встановлення з відкатом). Лише для діалогів запуску: ручне відновлення й
+    відновлення під час роботи журналюють цей збій самі. Невдалий відкат уже записано
+    в ``RecoveryService.restore`` разом з обома помилками. Виняток іде далі без змін.
     """
     recovery = RecoveryService(paths.database, paths.backups, clock)
-    outcome = recovery.restore(backup_path)
+    try:
+        outcome = recovery.restore(backup_path)
+    except BudgetError as exc:
+        if log_not_performed and exc.user_message != ROLLBACK_FAILED_MESSAGE:
+            log.warning(
+                "Restore from %s was not performed: %s", backup_path.name, _failure_cause(exc)
+            )
+        raise
     try:
         connection = open_application_database(paths, clock, create=False)
     except BudgetError as exc:
@@ -386,6 +401,37 @@ def restore_and_open(paths: DataPaths, clock: Clock, backup_path: Path) -> sqlit
         raise
     recovery.finish(outcome)
     return connection
+
+
+def _failure_cause(error: BaseException) -> str:
+    """Ланцюжок причин для журналу лише з типізованих даних: імена класів винятків, для
+    ``OSError`` — числові ``errno`` (із символьною назвою) і ``winerror``, для
+    ``sqlite3.Error`` — код ``sqlite_errorname``. Жодного вільного тексту: ``detail``,
+    ``strerror``, ім'я файлу й повідомлення SQLite можуть містити шляхи, SQL або дані."""
+    parts, seen = [], set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        codes = []
+        if isinstance(current, OSError):
+            if isinstance(current.errno, int):
+                codes.append(f"errno {current.errno} {errno.errorcode.get(current.errno, '?')}")
+            winerror = getattr(current, "winerror", None)
+            if isinstance(winerror, int):
+                codes.append(f"winerror {winerror}")
+        elif isinstance(current, sqlite3.Error):
+            name = getattr(current, "sqlite_errorname", None)
+            if isinstance(name, str) and name.isidentifier():
+                codes.append(name)
+        part = type(current).__name__
+        parts.append(f"{part} [{', '.join(codes)}]" if codes else part)
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+    return " <- ".join(parts)
 
 
 def _roll_back(recovery: RecoveryService, outcome, cause: BudgetError) -> None:
@@ -836,8 +882,10 @@ def _recover_missing_database(paths: DataPaths, clock: Clock) -> "_MissingDataba
     dialog = RecoveryDialog(
         None,
         load=recovery.candidates,
-        restore=lambda candidate: restore_and_open(paths, clock, candidate.backup.path),
-        start_empty=lambda: set_aside_orphaned_files(paths.database, clock),
+        restore=lambda candidate: restore_and_open(
+            paths, clock, candidate.backup.path, log_not_performed=True
+        ),
+        start_empty=lambda: _set_aside_before_empty_start(paths, clock),
     )
     if not dialog.exec():
         return None
@@ -845,6 +893,22 @@ def _recover_missing_database(paths: DataPaths, clock: Clock) -> "_MissingDataba
         return _MissingDatabaseChoice(None)
     log.info("Database restored from %s", dialog.selected().backup.path.name)
     return _MissingDatabaseChoice(dialog.restored)
+
+
+def _set_aside_before_empty_start(paths: DataPaths, clock: Clock) -> Path | None:
+    """``set_aside_orphaned_files`` із журналом: що саме відкладено або чому не вдалося.
+    Результат і виняток — без змін (діалог показує ту саму помилку, нової бази немає)."""
+    try:
+        target = set_aside_orphaned_files(paths.database, clock)
+    except StorageError as exc:
+        log.warning(
+            "Leftover database files were not set aside; no new database is created: %s",
+            _failure_cause(exc),
+        )
+        raise
+    if target is not None:  # лише назва комплекту, без звернень до файлової системи
+        log.info("Leftover database files set aside before starting empty: %s", target.name)
+    return target
 
 
 def _recover_corrupted_database(
@@ -868,7 +932,9 @@ def _recover_corrupted_database(
     dialog = RecoveryDialog(
         quarantined.name,
         load=recovery.candidates,
-        restore=lambda candidate: restore_and_open(paths, clock, candidate.backup.path),
+        restore=lambda candidate: restore_and_open(
+            paths, clock, candidate.backup.path, log_not_performed=True
+        ),
     )
     if not dialog.exec():
         return None

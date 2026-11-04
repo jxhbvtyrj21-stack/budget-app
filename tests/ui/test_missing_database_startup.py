@@ -5,11 +5,14 @@
 міграцій, автоматичних копій і ротації. Діалог керується через його ``exec``.
 """
 
+import errno
+import logging
 import os
 import shutil
 import sqlite3
 import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QTimer
@@ -17,6 +20,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from tests.sqlite_targets import connect_target
 
 import budget.app as app_module
+import budget.services.backup as backup_service_module
 import budget.services.startup as startup_module
 import budget.storage.recovery as recovery_module
 from budget.app import (
@@ -33,7 +37,7 @@ from budget.domain.money import Money
 from budget.errors import StorageError
 from budget.platform.identity import load_product_identity
 from budget.platform.paths import DataPaths
-from budget.services.backup import BackupKind, BackupService, RecoveryService
+from budget.services.backup import BackupKind, BackupService, RecoveryService, RestoreError
 from budget.services.facade import AppServices
 from budget.services.setup import InitialSetupService, SetupDraft
 from budget.services.startup import ORPHANS_NOT_SET_ASIDE_MESSAGE
@@ -329,7 +333,9 @@ def test_restore_from_backup_continues_like_startup_recovery(
     returned = []
     original = app_module.restore_and_open
     monkeypatch.setattr(
-        app_module, "restore_and_open", lambda *a: returned.append(original(*a)) or returned[-1]
+        app_module,
+        "restore_and_open",
+        lambda *a, **k: returned.append(original(*a, **k)) or returned[-1],
     )
     opened_before_choice = []
 
@@ -479,6 +485,344 @@ def test_leftover_wal_is_set_aside_before_starting_empty(
     for path in orphaned:
         assert path.read_bytes() == leftovers[path.name[-4:]]
     assert balance_with(moved, orphaned[1].read_bytes(), tmp_path / "check") == 4242
+
+
+# Журнал залишків і відновлення (F8-S2.1) -------------------------------------------------------
+
+
+def logged(caplog, logger: str, level: int, prefix: str) -> list[logging.LogRecord]:
+    """Записи логера ``logger`` рівня ``level``, що починаються з ``prefix``."""
+    return [
+        r
+        for r in caplog.records
+        if r.name == logger and r.levelno == level and r.getMessage().startswith(prefix)
+    ]
+
+
+def assert_without_paths(entries, *folders) -> None:
+    """Нові записи — лише назви файлів і причини, без повних шляхів і трасувань."""
+    for entry in entries:
+        text = entry.getMessage()
+        for folder in folders:
+            assert str(folder) not in text
+        assert entry.exc_info is None
+
+
+def deny_rename(monkeypatch, name: str) -> None:
+    """``Path.rename`` для файлу ``name`` — як на Windows, коли файл тримає інший процес."""
+    original = Path.rename
+
+    def rename(self, target):
+        if self.name == name:
+            raise PermissionError(13, "Permission denied", str(self))
+        return original(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+
+
+def set_aside_names(paths) -> str:
+    """Назва відкладеного комплекту (спільний префікс ``-wal``/``-shm``)."""
+    (wal,) = paths.root.glob("budget.db.orphaned-*-wal")
+    return wal.name[: -len("-wal")]
+
+
+SET_ASIDE_EMPTY = "Leftover database files set aside before starting empty: "
+NOT_SET_ASIDE = "Leftover database files were not set aside; no new database is created: "
+SET_ASIDE_RESTORE = "Файли бази відкладено вбік перед відновленням: "
+NOT_RESTORED = "Restore from "
+
+
+def restore_recording(chosen: list):
+    """Відновлення з першої копії; назва вибраної копії — у ``chosen``."""
+
+    def action(dialog):
+        chosen.append(dialog.selected().backup.path.name)
+        dialog.restore_selected()
+        return dialog.result()
+
+    return action
+
+
+def test_start_empty_logs_the_set_aside_files(
+    qtbot, paths, clock, monkeypatch, split_quarantine, confirmations, caplog, tmp_path
+):
+    caplog.set_level(logging.INFO)
+    Dialogs(monkeypatch, start_empty)
+    session, result = launch(paths, clock)
+    session.close()
+    assert result == (None, False)
+    (entry,) = logged(caplog, "budget.app", logging.INFO, SET_ASIDE_EMPTY)
+    assert entry.getMessage() == SET_ASIDE_EMPTY + set_aside_names(paths)
+    assert not logged(caplog, "budget.app", logging.WARNING, NOT_SET_ASIDE)
+    assert_without_paths([entry], paths.root, tmp_path)
+
+
+def test_failed_set_aside_before_start_empty_is_logged(
+    qtbot, paths, clock, monkeypatch, split_quarantine, confirmations, caplog, tmp_path
+):
+    _, leftovers = split_quarantine
+    caplog.set_level(logging.INFO)
+    deny_rename(monkeypatch, "budget.db-wal")
+    failures = []
+
+    def try_start_empty(dialog):
+        dialog.start_empty_selected()
+        failures.append(dialog.failure.body.text())
+        return dialog.result()
+
+    Dialogs(monkeypatch, try_start_empty)
+    _, result = launch(paths, clock)
+    assert failures == [ORPHANS_NOT_SET_ASIDE_MESSAGE]  # повідомлення користувачу те саме
+    assert result == (EXIT_DATA_CORRUPTED, False) and not paths.database.exists()
+    for side, data in leftovers.items():
+        assert (paths.root / f"budget.db{side}").read_bytes() == data
+    (entry,) = logged(caplog, "budget.app", logging.WARNING, NOT_SET_ASIDE)
+    assert entry.getMessage() == NOT_SET_ASIDE + (
+        "StorageError <- StorageError <- PermissionError [errno 13 EACCES]"
+    )
+    assert not logged(caplog, "budget.app", logging.INFO, SET_ASIDE_EMPTY)
+    assert_without_paths([entry], paths.root, tmp_path)
+
+
+def test_failed_set_aside_during_startup_restore_is_logged(
+    qtbot, paths, clock, monkeypatch, split_quarantine, confirmations, caplog, tmp_path
+):
+    _, leftovers = split_quarantine
+    caplog.set_level(logging.INFO)
+    deny_rename(monkeypatch, "budget.db-wal")
+    chosen = []
+    dialogs = Dialogs(monkeypatch, restore_recording(chosen))
+    _, result = launch(paths, clock)
+    assert dialogs.shown and result == (EXIT_DATA_CORRUPTED, False)
+    assert not paths.database.exists()
+    for side, data in leftovers.items():
+        assert (paths.root / f"budget.db{side}").read_bytes() == data
+    (entry,) = logged(caplog, "budget.app", logging.WARNING, NOT_RESTORED)
+    assert entry.getMessage() == (
+        f"Restore from {chosen[0]} was not performed: "
+        "RestoreError <- StorageError <- PermissionError [errno 13 EACCES]"
+    )
+    assert not logged(caplog, "budget.services.backup", logging.INFO, SET_ASIDE_RESTORE)
+    assert_without_paths([entry], paths.root, tmp_path)
+
+
+def test_failed_install_with_rollback_during_startup_restore_is_logged(
+    qtbot, paths, clock, monkeypatch, split_quarantine, confirmations, caplog, tmp_path
+):
+    _, leftovers = split_quarantine
+    caplog.set_level(logging.INFO)
+
+    def no_space(backup_path, database_path):
+        try:
+            raise OSError(28, "No space left on device")
+        except OSError as exc:
+            raise StorageError(detail=f"Відновлення не вдалося: {exc}") from exc
+
+    monkeypatch.setattr(backup_service_module, "restore_from_backup", no_space)
+    chosen = []
+    Dialogs(monkeypatch, restore_recording(chosen))
+    _, result = launch(paths, clock)
+    assert result == (EXIT_DATA_CORRUPTED, False) and not paths.database.exists()
+    # Відкат повернув залишки під старі назви — як до спроби.
+    for side, data in leftovers.items():
+        assert (paths.root / f"budget.db{side}").read_bytes() == data
+    assert not [p for p in paths.root.iterdir() if ".orphaned-" in p.name]
+    (entry,) = logged(caplog, "budget.app", logging.WARNING, NOT_RESTORED)
+    assert entry.getMessage() == (
+        f"Restore from {chosen[0]} was not performed: "
+        "RestoreError <- StorageError <- OSError [errno 28 ENOSPC]"
+    )
+    assert_without_paths([entry], paths.root, tmp_path)
+
+
+def test_startup_restore_logs_the_set_aside_files(
+    qtbot, paths, clock, monkeypatch, split_quarantine, confirmations, caplog, tmp_path
+):
+    caplog.set_level(logging.INFO)
+    Dialogs(monkeypatch, restore_first)
+    session, result = launch(paths, clock)
+    session.close()
+    assert result == (None, True)
+    (entry,) = logged(caplog, "budget.services.backup", logging.INFO, SET_ASIDE_RESTORE)
+    assert entry.getMessage() == SET_ASIDE_RESTORE + set_aside_names(paths)
+    assert not logged(caplog, "budget.app", logging.WARNING, NOT_RESTORED)
+    assert_without_paths([entry], paths.root, tmp_path)
+
+
+def test_shared_restore_logs_nothing_new_without_the_startup_flag(
+    paths, clock, monkeypatch, split_quarantine, caplog
+):
+    """Ручне відновлення й відновлення під час роботи викликають ``restore_and_open`` без
+    ``log_not_performed`` і журналюють збій самі: нового запису тут немає. Виняток той
+    самий, що й із прапорцем."""
+    _, leftovers = split_quarantine
+    caplog.set_level(logging.INFO)
+    deny_rename(monkeypatch, "budget.db-wal")
+    backup = RecoveryService(paths.database, paths.backups, clock).candidates()[0].backup.path
+    raised = []
+    for flag in (False, True):
+        caplog.clear()
+        with pytest.raises(RestoreError) as failure:
+            app_module.restore_and_open(paths, clock, backup, log_not_performed=flag)
+        error = failure.value
+        raised.append((type(error), error.user_message, error.detail, type(error.__cause__)))
+        assert len(logged(caplog, "budget.app", logging.WARNING, NOT_RESTORED)) == int(flag)
+    assert raised[0] == raised[1]
+    for side, data in leftovers.items():
+        assert (paths.root / f"budget.db{side}").read_bytes() == data
+
+
+def test_failure_cause_keeps_only_typed_codes(tmp_path):
+    """Шляхи (з кирилицею й пробілом), SQL і дані з повідомлень у журнал не потрапляють."""
+    secret = tmp_path / "Олена Коваль" / "budget.db"
+    try:
+        try:
+            try:
+                raise OSError(errno.EACCES, f"Permission denied: {secret}", str(secret))
+            except OSError as exc:
+                message = f"near \"SELECT amount FROM incomes WHERE name='Зарплата'\": {secret}"
+                raise sqlite3.OperationalError(message) from exc
+        except sqlite3.Error as exc:
+            raise StorageError(detail=f"Не вдалося відкрити базу {secret}") from exc
+    except StorageError as error:
+        text = app_module._failure_cause(error)
+    assert text == "StorageError <- OperationalError <- PermissionError [errno 13 EACCES]"
+
+    try:  # справжня помилка SQLite: код SQLITE_CANTOPEN замість тексту повідомлення
+        sqlite3.connect((tmp_path / "немає" / "x.db").as_uri() + "?mode=rw", uri=True)
+    except sqlite3.OperationalError as error:
+        real = app_module._failure_cause(error)
+    assert real == "OperationalError [SQLITE_CANTOPEN]"
+    for fragment in (str(tmp_path), "Олена", "SELECT", "Зарплата", "Permission denied", "unable"):
+        assert fragment not in text and fragment not in real
+
+
+def test_failure_cause_respects_exception_chain_visibility():
+    """Прихований контекст ігнорується, явна причина має пріоритет."""
+    hidden = RuntimeError("outer")
+    hidden.__context__ = ValueError("hidden secret")
+    hidden.__suppress_context__ = True
+
+    assert app_module._failure_cause(hidden) == "RuntimeError"
+
+    visible = RuntimeError("outer")
+    visible.__context__ = ValueError("internal")
+
+    assert app_module._failure_cause(visible) == "RuntimeError <- ValueError"
+
+    explicit = RuntimeError("outer")
+    explicit.__context__ = ValueError("context")
+    explicit.__cause__ = KeyError("explicit")
+
+    assert app_module._failure_cause(explicit) == "RuntimeError <- KeyError"
+
+class FailingStatAfterSetAside:
+    """D1: ``Path.exists`` для вже відкладених файлів дає ``OSError`` (EIO) — лише у вікні
+    між поверненням ``set_aside_database`` і наступним кроком основного потоку. Поза вікном
+    і для інших файлів — справжній ``Path.exists``. ``hits`` — спроби діагностики в
+    цьому вікні; ``events`` — порядок основних операцій."""
+
+    def __init__(self, monkeypatch, module, *, restore: bool = False) -> None:
+        self.open = False
+        self.hits: list[str] = []
+        self.events: list[str] = []
+        original_set_aside = module.set_aside_database
+
+        def set_aside(*args, **kwargs):
+            result = original_set_aside(*args, **kwargs)
+            self.events.append("set_aside")
+            self.open = True
+            return result
+
+        monkeypatch.setattr(module, "set_aside_database", set_aside)
+        original_exists = Path.exists
+
+        def exists(path, *args, **kwargs):
+            if self.open and ".orphaned-" in path.name and os.path.lexists(path):
+                self.hits.append(path.name)
+                raise OSError(errno.EIO, "Input/output error", str(path))
+            return original_exists(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "exists", exists)
+        if restore:
+            original_put_back = RecoveryService._put_back
+
+            def put_back(service, set_aside_path):
+                self.events.append("put_back")
+                return original_put_back(service, set_aside_path)
+
+            monkeypatch.setattr(RecoveryService, "_put_back", put_back)
+
+    def close(self) -> None:
+        self.open = False
+
+    def assert_would_fail(self, path) -> None:
+        """Сама імітація справжня: у вікні ``exists`` відкладеного файлу — ``OSError``."""
+        self.open = True
+        with pytest.raises(OSError):
+            path.exists()
+        self.open = False
+        self.hits.pop()
+
+
+def test_start_empty_succeeds_without_stat_of_set_aside_files(
+    qtbot, paths, clock, monkeypatch, split_quarantine, confirmations, caplog, tmp_path
+):
+    """D1: після вдалого перенесення журнал не звертається до файлової системи, тож збій
+    ``stat`` відкладених файлів не змінює успішного порожнього старту."""
+    _, leftovers = split_quarantine
+    caplog.set_level(logging.INFO)
+    probe = FailingStatAfterSetAside(monkeypatch, startup_module)
+    Dialogs(monkeypatch, start_empty)
+    session, result = launch(paths, clock)
+    probe.close()
+    session.close()
+    assert result == (None, False) and paths.database.exists()
+    assert probe.events == ["set_aside"] and probe.hits == []
+    orphaned = sorted(p for p in paths.root.iterdir() if ".orphaned-" in p.name)
+    assert {p.name[-4:]: p.read_bytes() for p in orphaned} == leftovers
+    (entry,) = logged(caplog, "budget.app", logging.INFO, SET_ASIDE_EMPTY)
+    assert entry.getMessage() == SET_ASIDE_EMPTY + set_aside_names(paths)
+    assert_without_paths([entry], paths.root, tmp_path)
+    probe.assert_would_fail(orphaned[0])
+
+
+def test_restore_keeps_its_order_without_stat_of_set_aside_files(
+    qtbot, paths, clock, monkeypatch, split_quarantine, confirmations, caplog, tmp_path
+):
+    """D1: після відкладення діагностика не перериває ``set_aside`` →
+    ``restore_from_backup`` → ``_put_back``; невдача встановлення лишається тією самою
+    ``RestoreError``, а відкат повертає залишки під старі назви."""
+    _, leftovers = split_quarantine
+    caplog.set_level(logging.INFO)
+    probe = FailingStatAfterSetAside(monkeypatch, backup_service_module, restore=True)
+
+    def no_space(backup_path, database_path):
+        probe.events.append("restore_from_backup")
+        probe.close()  # наступний крок основного потоку: далі — справжній ``exists``
+        try:
+            raise OSError(28, "No space left on device")
+        except OSError as exc:
+            raise StorageError(detail=f"Відновлення не вдалося: {exc}") from exc
+
+    monkeypatch.setattr(backup_service_module, "restore_from_backup", no_space)
+    chosen = []
+    Dialogs(monkeypatch, restore_recording(chosen))
+    _, result = launch(paths, clock)
+    assert probe.events == ["set_aside", "restore_from_backup", "put_back"]
+    assert probe.hits == []
+    assert result == (EXIT_DATA_CORRUPTED, False) and not paths.database.exists()
+    for side, data in leftovers.items():
+        assert (paths.root / f"budget.db{side}").read_bytes() == data
+    assert not [p for p in paths.root.iterdir() if ".orphaned-" in p.name]
+    (aside,) = logged(caplog, "budget.services.backup", logging.INFO, SET_ASIDE_RESTORE)
+    assert aside.getMessage().startswith(SET_ASIDE_RESTORE + "budget.db.orphaned-")
+    (entry,) = logged(caplog, "budget.app", logging.WARNING, NOT_RESTORED)
+    assert entry.getMessage() == (
+        f"Restore from {chosen[0]} was not performed: "
+        "RestoreError <- StorageError <- OSError [errno 28 ENOSPC]"
+    )
+    assert_without_paths([aside, entry], paths.root, tmp_path)
 
 
 # T10. Кожна ознака окремо --------------------------------------------------------------------

@@ -334,6 +334,9 @@ class RecoveryService:
                 set_aside = set_aside_database(self._database_path, label)
             except StorageError as exc:
                 raise RestoreError(detail=exc.detail) from exc
+            # Лише назва комплекту (без повного шляху й без звернень до файлової системи:
+            # журнал не має змінювати хід відновлення після вдалого перенесення).
+            log.info("Файли бази відкладено вбік перед відновленням: %s", set_aside.name)
         try:
             restore_from_backup(backup_path, self._database_path)
         except StorageError as exc:
